@@ -16,7 +16,7 @@ try:
     TELEGRAM_BOT_TOKEN = config.get('telegram_bot_token', '')
     TELEGRAM_CHAT_ID = config.get('telegram_chat_id', '')
     DB_PATH = config.get('db_path', '/etc/x-ui/x-ui.db')
-    SYNC_INTERVAL = config.get('sync_interval', 10)  # مدت زمان همگام‌سازی به دقیقه
+    SYNC_INTERVAL = config.get('sync_interval', 10)
 except FileNotFoundError:
     logging.error("فایل config.json یافت نشد")
     exit(1)
@@ -33,7 +33,7 @@ async def send_telegram_message(message):
         logging.error(f"خطا در ارسال پیام تلگرام: {str(e)}")
 
 def sync_users():
-    """همگام‌سازی ترافیک و تاریخ انقضای تمام کاربران با subId یکسان"""
+    """همگام‌سازی ترافیک و تاریخ انقضای تمام کاربران با UUID یکسان"""
     try:
         # اتصال به پایگاه داده
         conn = sqlite3.connect(DB_PATH)
@@ -43,38 +43,42 @@ def sync_users():
         cursor.execute("SELECT id, inbound_id, email, up, down, expiry_time FROM client_traffics")
         traffics = cursor.fetchall()
 
-        # دریافت تنظیمات اینباند‌ها برای استخراج subId
+        # دریافت تنظیمات اینباند‌ها برای استخراج UUID
         cursor.execute("SELECT id, settings FROM inbounds")
         inbounds = cursor.fetchall()
 
-        # ایجاد دیکشنری برای نگاشت inbound_id و email به subId
-        inbound_to_subid = {}
+        # ایجاد دیکشنری برای نگاشت inbound_id و email به UUID
+        inbound_to_uuid = {}
         for inbound_id, settings in inbounds:
             try:
                 settings_json = json.loads(settings)
                 clients = settings_json.get("clients", [])
                 for client in clients:
-                    sub_id = client.get("subId")
+                    uuid = client.get("id")
                     email = client.get("email")
-                    if sub_id and email:
-                        inbound_to_subid[(inbound_id, email)] = sub_id
+                    if uuid and email:
+                        inbound_to_uuid[(inbound_id, email)] = uuid
             except json.JSONDecodeError:
                 logging.warning(f"خطا در تجزیه JSON برای inbound_id: {inbound_id}")
                 continue
 
-        # گروه‌بندی کاربران بر اساس subId
+        # گروه‌بندی کاربران بر اساس UUID
         user_groups = {}
         for traffic in traffics:
             traffic_id, inbound_id, email, up, down, expiry_time = traffic
-            sub_id = inbound_to_subid.get((inbound_id, email))
-            if sub_id:
-                if sub_id not in user_groups:
-                    user_groups[sub_id] = []
-                user_groups[sub_id].append(traffic)
+            uuid = inbound_to_uuid.get((inbound_id, email))
+            if uuid:
+                if uuid not in user_groups:
+                    user_groups[uuid] = []
+                user_groups[uuid].append(traffic)
+        
+        # چاپ گروه‌ها برای عیب‌یابی
+        logging.info(f"گروه‌های کاربران: {user_groups}")
+        print(f"گروه‌های کاربران: {user_groups}")
 
         # همگام‌سازی ترافیک و تاریخ انقضا
-        for sub_id, group in user_groups.items():
-            if len(group) > 1:  # فقط کاربران با subId یکسان در اینباندهای مختلف
+        for uuid, group in user_groups.items():
+            if len(group) > 1:  # فقط کاربران با UUID یکسان در اینباندهای مختلف
                 # جمع‌آوری اطلاعات ترافیک و انقضا
                 total_up = sum(traffic[3] for traffic in group if traffic[3] is not None)
                 total_down = sum(traffic[4] for traffic in group if traffic[4] is not None)
@@ -91,7 +95,7 @@ def sync_users():
                 # ارسال گزارش به تلگرام
                 emails = [traffic[2] for traffic in group]
                 message = (
-                    f"همگام‌سازی انجام شد برای subId: {sub_id}\n"
+                    f"همگام‌سازی انجام شد برای UUID: {uuid}\n"
                     f"ایمیل‌ها: {', '.join(emails)}\n"
                     f"ترافیک آپلود: {total_up/(1024**3):.2f} GB\n"
                     f"ترافیک دانلود: {total_down/(1024**3):.2f} GB\n"
@@ -99,7 +103,7 @@ def sync_users():
                 )
                 import asyncio
                 asyncio.run(send_telegram_message(message))
-                logging.info(f"همگام‌سازی برای subId: {sub_id} انجام شد")
+                logging.info(f"همگام‌سازی برای UUID: {uuid} انجام شد")
 
         conn.commit()
         conn.close()
