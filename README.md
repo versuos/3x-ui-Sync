@@ -11,7 +11,7 @@
 ## نصب
 1. اسکریپت نصب را اجرا کنید:
    ```bash
-   bash <(curl -Ls https://raw.githubusercontent.com/your_username/3x-ui-sync/main/install.sh)
+   bash <(curl -Ls https://raw.githubusercontent.com/versuos/3x-ui-sync/main/install.sh)
    ```
 2. در طول نصب، اطلاعات زیر را وارد کنید:
    - توکن ربات تلگرام (از @BotFather)
