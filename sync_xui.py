@@ -107,19 +107,10 @@ def sync_users():
                     )
 
                 # ارسال گزارش به تلگرام
-                emails = [traffic[2] for traffic in group]
-                status_text = "غیرفعال" if is_any_disabled else "فعال"
-                message = (
-                    f"همگام‌سازی انجام شد برای subId: {sub_id}\n"
-                    f"ایمیل‌ها: {', '.join(emails)}\n"
-                    f"ترافیک آپلود: {max_up/(1024**3):.2f} GB\n"
-                    f"ترافیک دانلود: {max_down/(1024**3):.2f} GB\n"
-                    f"تاریخ انقضا: {datetime.fromtimestamp(max_expiry/1000) if max_expiry else 'نامشخص'}\n"
-                    f"وضعیت: {status_text}"
-                )
+                message = "مصرف اینباند‌ها آپدیت شدند"
                 import asyncio
                 asyncio.run(send_telegram_message(message))
-                logging.info(f"همگام‌سازی برای subId: {sub_id} انجام شد - وضعیت: {status_text}")
+                logging.info(f"همگام‌سازی برای subId: {sub_id} انجام شد - وضعیت: {'غیرفعال' if is_any_disabled else 'فعال'}")
 
         conn.commit()
         conn.close()
