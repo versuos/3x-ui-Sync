@@ -23,6 +23,10 @@
    ```bash
    sudo systemctl status 3x-ui-sync.service
    ```
+ریستارت سرویس :
+   ```bash
+sudo systemctl restart 3x-ui-sync.service
+   ```
 
 ## عیب‌یابی
 - **لاگ‌ها**: `/opt/3x-ui-sync/sync_xui.log`
