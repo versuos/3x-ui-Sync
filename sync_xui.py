@@ -70,17 +70,17 @@ def sync_users():
         # همگام‌سازی ترافیک و تاریخ انقضا
         for sub_id, group in user_groups.items():
             if len(group) > 1:  # فقط کاربران با subId یکسان در اینباندهای مختلف
-                # جمع‌آوری اطلاعات ترافیک و انقضا
-                total_up = sum(traffic[3] for traffic in group if traffic[3] is not None)
-                total_down = sum(traffic[4] for traffic in group if traffic[4] is not None)
+                # انتخاب بیشترین مقدار ترافیک و انقضا
+                max_up = max(traffic[3] for traffic in group if traffic[3] is not None)
+                max_down = max(traffic[4] for traffic in group if traffic[4] is not None)
                 max_expiry = max(traffic[5] for traffic in group if traffic[5] is not None)
 
-                # به‌روزرسانی تمام کاربران با مقادیر جمع‌شده
+                # به‌روزرسانی تمام کاربران با مقادیر حداکثر
                 for traffic in group:
                     traffic_id = traffic[0]
                     cursor.execute(
                         "UPDATE client_traffics SET up = ?, down = ?, expiry_time = ? WHERE id = ?",
-                        (total_up, total_down, max_expiry, traffic_id)
+                        (max_up, max_down, max_expiry, traffic_id)
                     )
 
                 # ارسال گزارش به تلگرام
@@ -88,8 +88,8 @@ def sync_users():
                 message = (
                     f"همگام‌سازی انجام شد برای subId: {sub_id}\n"
                     f"ایمیل‌ها: {', '.join(emails)}\n"
-                    f"ترافیک آپلود: {total_up/(1024**3):.2f} GB\n"
-                    f"ترافیک دانلود: {total_down/(1024**3):.2f} GB\n"
+                    f"ترافیک آپلود: {max_up/(1024**3):.2f} GB\n"
+                    f"ترافیک دانلود: {max_down/(1024**3):.2f} GB\n"
                     f"تاریخ انقضا: {datetime.fromtimestamp(max_expiry/1000) if max_expiry else 'نامشخص'}"
                 )
                 import asyncio
