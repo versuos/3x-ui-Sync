@@ -24,22 +24,23 @@ async def send_telegram_message(message):
         logging.error(f"خطا در ارسال پیام تلگرام: {str(e)}")
 
 def sync_users():
-    """همگام‌سازی ترافیک و تاریخ انقضای تمام کاربران با subId یکسان"""
+    """همگام‌سازی ترافیک، تاریخ انقضا و وضعیت فعال/غیرفعال کاربران با subId یکسان"""
     try:
         # اتصال به پایگاه داده
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
         # دریافت تمام اطلاعات ترافیک
-        cursor.execute("SELECT id, inbound_id, email, up, down, expiry_time FROM client_traffics")
+        cursor.execute("SELECT id, inbound_id, email, up, down, expiry_time, enable FROM client_traffics")
         traffics = cursor.fetchall()
 
-        # دریافت تنظیمات اینباند‌ها برای استخراج subId
+        # دریافت تنظیمات اینباند‌ها برای استخراج subId و total
         cursor.execute("SELECT id, settings FROM inbounds")
         inbounds = cursor.fetchall()
 
-        # ایجاد دیکشنری برای نگاشت inbound_id و email به subId
+        # ایجاد دیکشنری برای نگاشت inbound_id و email به subId و total
         inbound_to_subid = {}
+        inbound_to_total = {}
         for inbound_id, settings in inbounds:
             try:
                 settings_json = json.loads(settings)
@@ -47,8 +48,10 @@ def sync_users():
                 for client in clients:
                     sub_id = client.get("subId")
                     email = client.get("email")
+                    total = client.get("total", 0)
                     if sub_id and email:
                         inbound_to_subid[(inbound_id, email)] = sub_id
+                        inbound_to_total[(inbound_id, email)] = total
             except json.JSONDecodeError:
                 logging.warning(f"خطا در تجزیه JSON برای inbound_id: {inbound_id}")
                 continue
@@ -56,7 +59,7 @@ def sync_users():
         # گروه‌بندی کاربران بر اساس subId
         user_groups = {}
         for traffic in traffics:
-            traffic_id, inbound_id, email, up, down, expiry_time = traffic
+            traffic_id, inbound_id, email, up, down, expiry_time, enable = traffic
             sub_id = inbound_to_subid.get((inbound_id, email))
             if sub_id:
                 if sub_id not in user_groups:
@@ -67,7 +70,7 @@ def sync_users():
         logging.info(f"گروه‌های کاربران: {user_groups}")
         print(f"گروه‌های کاربران: {user_groups}")
 
-        # همگام‌سازی ترافیک و تاریخ انقضا
+        # همگام‌سازی ترافیک، تاریخ انقضا و وضعیت فعال/غیرفعال
         for sub_id, group in user_groups.items():
             if len(group) > 1:  # فقط کاربران با subId یکسان در اینباندهای مختلف
                 # انتخاب بیشترین مقدار ترافیک و انقضا
@@ -75,26 +78,48 @@ def sync_users():
                 max_down = max(traffic[4] for traffic in group if traffic[4] is not None)
                 max_expiry = max(traffic[5] for traffic in group if traffic[5] is not None)
 
-                # به‌روزرسانی تمام کاربران با مقادیر حداکثر
+                # بررسی وضعیت غیرفعال بودن (اتمام حجم یا زمان)
+                is_any_disabled = False
+                for traffic in group:
+                    traffic_id, inbound_id, email, up, down, expiry_time, enable = traffic
+                    total = inbound_to_total.get((inbound_id, email), 0)
+                    # بررسی اتمام حجم
+                    if total > 0 and (up + down) >= total:
+                        is_any_disabled = True
+                        break
+                    # بررسی اتمام زمان
+                    current_time = int(time.time() * 1000)  # زمان فعلی به میلی‌ثانیه
+                    if expiry_time > 0 and expiry_time <= current_time:
+                        is_any_disabled = True
+                        break
+                    # بررسی غیرفعال بودن
+                    if enable == 0:
+                        is_any_disabled = True
+                        break
+
+                # به‌روزرسانی تمام کاربران در گروه
                 for traffic in group:
                     traffic_id = traffic[0]
+                    enable_status = 0 if is_any_disabled else 1
                     cursor.execute(
-                        "UPDATE client_traffics SET up = ?, down = ?, expiry_time = ? WHERE id = ?",
-                        (max_up, max_down, max_expiry, traffic_id)
+                        "UPDATE client_traffics SET up = ?, down = ?, expiry_time = ?, enable = ? WHERE id = ?",
+                        (max_up, max_down, max_expiry, enable_status, traffic_id)
                     )
 
                 # ارسال گزارش به تلگرام
                 emails = [traffic[2] for traffic in group]
+                status_text = "غیرفعال" if is_any_disabled else "فعال"
                 message = (
                     f"همگام‌سازی انجام شد برای subId: {sub_id}\n"
                     f"ایمیل‌ها: {', '.join(emails)}\n"
                     f"ترافیک آپلود: {max_up/(1024**3):.2f} GB\n"
                     f"ترافیک دانلود: {max_down/(1024**3):.2f} GB\n"
-                    f"تاریخ انقضا: {datetime.fromtimestamp(max_expiry/1000) if max_expiry else 'نامشخص'}"
+                    f"تاریخ انقضا: {datetime.fromtimestamp(max_expiry/1000) if max_expiry else 'نامشخص'}\n"
+                    f"وضعیت: {status_text}"
                 )
                 import asyncio
                 asyncio.run(send_telegram_message(message))
-                logging.info(f"همگام‌سازی برای subId: {sub_id} انجام شد")
+                logging.info(f"همگام‌سازی برای subId: {sub_id} انجام شد - وضعیت: {status_text}")
 
         conn.commit()
         conn.close()
