@@ -26,6 +26,13 @@ curl -L -o "$INSTALL_DIR/sync_xui.py" "https://raw.githubusercontent.com/ali123/
 # تنظیم مجوزها
 chmod 600 "$INSTALL_DIR/sync_xui.py"
 
+# بررسی وجود پایگاه داده
+DB_PATH="/etc/x-ui/x-ui.db"
+if [ ! -f "$DB_PATH" ]; then
+  echo "خطا: فایل پایگاه داده ($DB_PATH) یافت نشد!"
+  exit 1
+fi
+
 # ایجاد سرویس Systemd
 echo "تنظیم سرویس Systemd..."
 cat > /etc/systemd/system/3x-ui-sync.service << EOL
@@ -37,6 +44,8 @@ After=network.target
 ExecStart=/usr/bin/python3 $INSTALL_DIR/sync_xui.py
 Restart=always
 User=root
+StandardOutput=append:/opt/3x-ui-sync/sync_xui.log
+StandardError=append:/opt/3x-ui-sync/sync_xui.log
 
 [Install]
 WantedBy=multi-user.target
