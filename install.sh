@@ -21,7 +21,7 @@ mkdir -p "$INSTALL_DIR"
 
 # دانلود فایل اصلی از GitHub
 echo "دانلود فایل‌های پروژه..."
-curl -L -o "$INSTALL_DIR/sync_xui.py" "https://raw.githubusercontent.com/ali123/3x-ui-sync/main/sync_xui.py"
+curl -L -o "$INSTALL_DIR/sync_xui.py" "https://raw.githubusercontent.com/versuos/3x-ui-sync/main/sync_xui.py"
 
 # تنظیم مجوزها
 chmod 600 "$INSTALL_DIR/sync_xui.py"
