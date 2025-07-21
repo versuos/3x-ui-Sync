@@ -28,6 +28,12 @@
 sudo systemctl restart 3x-ui-sync.service
    ```
 
+دستور حذف :
+
+   ```bash
+sudo rm -rf /opt/3x-ui-sync/*
+   ```
+
 ## عیب‌یابی
 - **لاگ‌ها**: `/opt/3x-ui-sync/sync_xui.log`
 - **بررسی پایگاه داده**:
