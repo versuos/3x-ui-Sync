@@ -106,11 +106,13 @@ def sync_users():
                         (max_up, max_down, max_expiry, enable_status, traffic_id)
                     )
 
-                # ارسال گزارش به تلگرام
-                message = "مصرف اینباند‌ها آپدیت شدند"
-                import asyncio
-                asyncio.run(send_telegram_message(message))
                 logging.info(f"همگام‌سازی برای subId: {sub_id} انجام شد - وضعیت: {'غیرفعال' if is_any_disabled else 'فعال'}")
+
+        # ارسال پیام تلگرام پس از اتمام همگام‌سازی
+        if user_groups:  # فقط اگر گروه‌هایی برای همگام‌سازی وجود داشت
+            message = "مصرف اینباند‌ها آپدیت شدند"
+            import asyncio
+            asyncio.run(send_telegram_message(message))
 
         conn.commit()
         conn.close()
