@@ -19,12 +19,29 @@ pip3 install python-telegram-bot==20.7 schedule
 INSTALL_DIR="/opt/3x-ui-sync"
 mkdir -p "$INSTALL_DIR"
 
+# دریافت ورودی‌های کاربر
+read -p "توکن ربات تلگرام را وارد کنید: " TELEGRAM_BOT_TOKEN
+read -p "شناسه چت تلگرام (Chat ID) را وارد کنید: " TELEGRAM_CHAT_ID
+read -p "بازه زمانی همگام‌سازی (به دقیقه، پیش‌فرض 10): " SYNC_INTERVAL
+SYNC_INTERVAL=${SYNC_INTERVAL:-10}  # پیش‌فرض 10 دقیقه
+
+# ایجاد فایل تنظیمات
+echo "ایجاد فایل تنظیمات..."
+cat > "$INSTALL_DIR/config.json" << EOL
+{
+  "TELEGRAM_BOT_TOKEN": "$TELEGRAM_BOT_TOKEN",
+  "TELEGRAM_CHAT_ID": "$TELEGRAM_CHAT_ID",
+  "SYNC_INTERVAL": $SYNC_INTERVAL
+}
+EOL
+
 # دانلود فایل اصلی از GitHub
 echo "دانلود فایل‌های پروژه..."
 curl -L -o "$INSTALL_DIR/sync_xui.py" "https://raw.githubusercontent.com/versuos/3x-ui-sync/main/sync_xui.py"
 
 # تنظیم مجوزها
 chmod 600 "$INSTALL_DIR/sync_xui.py"
+chmod 600 "$INSTALL_DIR/config.json"
 
 # بررسی وجود پایگاه داده
 DB_PATH="/etc/x-ui/x-ui.db"
