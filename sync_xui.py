@@ -3,6 +3,7 @@ import time
 import schedule
 import json
 import logging
+import asyncio  # اضافه کردن asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
@@ -56,9 +57,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyboard = [
-        [InlineKeyboardButton("تغییر توکن ربات", callback_data='set_token')],
-        [InlineKeyboardButton("تغییر شناسه چت", callback_data='set_chatid')],
-        [InlineKeyboardButton("تغییر بازه زمانی", callback_data='set_interval')]
+        [InlineKeyboardButton("🛠 تغییر توکن ربات", callback_data='set_token')],
+        [InlineKeyboardButton("👤 تغییر شناسه چت", callback_data='set_chatid')],
+        [InlineKeyboardButton("⏰ تغییر بازه زمانی", callback_data='set_interval')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
@@ -95,7 +96,7 @@ async def receive_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     token = update.message.text.strip()
     config['TELEGRAM_BOT_TOKEN'] = token
     save_config(config)
-    await update.message.reply_text("توکن ربات با موفقیت تغییر کرد!")
+    await update.message.reply_text("توکن ربات با موفقیت تغییر کرد! لطفاً سرویس را ری‌استارت کنید:\n`sudo systemctl restart 3x-ui-sync.service`")
     logging.info(f"توکن ربات تغییر کرد: {token}")
     return ConversationHandler.END
 
@@ -228,7 +229,7 @@ def main():
     # راه‌اندازی ربات تلگرام
     application = Application.builder().token(config['TELEGRAM_BOT_TOKEN']).build()
     
-    # تعریف ConversationHandler
+    # تعریف ConversationHandler با تنظیم per_message=True برای رفع هشدار
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start), CallbackQueryHandler(button)],
         states={
@@ -236,7 +237,8 @@ def main():
             SET_CHATID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_chatid)],
             SET_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_interval)]
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[CommandHandler('cancel', cancel)],
+        per_message=True  # رفع هشدار PTBUserWarning
     )
     application.add_handler(conv_handler)
 
@@ -244,7 +246,8 @@ def main():
     schedule.every(config['SYNC_INTERVAL']).minutes.do(sync_users)
 
     # اجرای ربات و زمان‌بندی به‌صورت همزمان
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     loop.create_task(application.run_polling())
     while True:
         schedule.run_pending()
