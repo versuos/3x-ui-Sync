@@ -9,10 +9,13 @@ import logging
 # تنظیم لاگ‌گیری
 logging.basicConfig(filename='/opt/3x-ui-sync/sync_xui.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# تنظیمات ربات تلگرام
-TELEGRAM_BOT_TOKEN = "8036904228:AAELw-wxr92SPpsfHPlJcIITCg8bHdukJss"  # توکن ربات
-TELEGRAM_CHAT_ID = "54515010"     # شناسه مدیر یا کانال
-DB_PATH = "/etc/x-ui/x-ui.db"         # مسیر پایگاه داده 3X-UI
+# خواندن تنظیمات
+CONFIG_FILE = "/opt/3x-ui-sync/config.json"
+with open(CONFIG_FILE, 'r') as f:
+    config = json.load(f)
+TELEGRAM_BOT_TOKEN = config['telegram_bot_token']
+TELEGRAM_CHAT_ID = config['telegram_chat_id']
+DB_PATH = "/etc/x-ui/x-ui.db"
 
 async def send_telegram_message(message):
     """ارسال پیام به تلگرام"""
@@ -26,19 +29,15 @@ async def send_telegram_message(message):
 def sync_users():
     """همگام‌سازی ترافیک، تاریخ انقضا و وضعیت فعال/غیرفعال کاربران با subId یکسان"""
     try:
-        # اتصال به پایگاه داده
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
-        # دریافت تمام اطلاعات ترافیک
         cursor.execute("SELECT id, inbound_id, email, up, down, expiry_time, enable FROM client_traffics")
         traffics = cursor.fetchall()
 
-        # دریافت تنظیمات اینباند‌ها برای استخراج subId و total
         cursor.execute("SELECT id, settings FROM inbounds")
         inbounds = cursor.fetchall()
 
-        # ایجاد دیکشنری برای نگاشت inbound_id و email به subId و total
         inbound_to_subid = {}
         inbound_to_total = {}
         for inbound_id, settings in inbounds:
@@ -56,7 +55,6 @@ def sync_users():
                 logging.warning(f"خطا در تجزیه JSON برای inbound_id: {inbound_id}")
                 continue
 
-        # گروه‌بندی کاربران بر اساس subId
         user_groups = {}
         for traffic in traffics:
             traffic_id, inbound_id, email, up, down, expiry_time, enable = traffic
@@ -66,38 +64,30 @@ def sync_users():
                     user_groups[sub_id] = []
                 user_groups[sub_id].append(traffic)
 
-        # چاپ گروه‌ها برای عیب‌یابی
         logging.info(f"گروه‌های کاربران: {user_groups}")
         print(f"گروه‌های کاربران: {user_groups}")
 
-        # همگام‌سازی ترافیک، تاریخ انقضا و وضعیت فعال/غیرفعال
         for sub_id, group in user_groups.items():
-            if len(group) > 1:  # فقط کاربران با subId یکسان در اینباندهای مختلف
-                # انتخاب بیشترین مقدار ترافیک و انقضا
+            if len(group) > 1:
                 max_up = max(traffic[3] for traffic in group if traffic[3] is not None)
                 max_down = max(traffic[4] for traffic in group if traffic[4] is not None)
                 max_expiry = max(traffic[5] for traffic in group if traffic[5] is not None)
 
-                # بررسی وضعیت غیرفعال بودن (اتمام حجم یا زمان)
                 is_any_disabled = False
                 for traffic in group:
                     traffic_id, inbound_id, email, up, down, expiry_time, enable = traffic
                     total = inbound_to_total.get((inbound_id, email), 0)
-                    # بررسی اتمام حجم
                     if total > 0 and (up + down) >= total:
                         is_any_disabled = True
                         break
-                    # بررسی اتمام زمان
-                    current_time = int(time.time() * 1000)  # زمان فعلی به میلی‌ثانیه
+                    current_time = int(time.time() * 1000)
                     if expiry_time > 0 and expiry_time <= current_time:
                         is_any_disabled = True
                         break
-                    # بررسی غیرفعال بودن
                     if enable == 0:
                         is_any_disabled = True
                         break
 
-                # به‌روزرسانی تمام کاربران در گروه
                 for traffic in group:
                     traffic_id = traffic[0]
                     enable_status = 0 if is_any_disabled else 1
@@ -108,8 +98,7 @@ def sync_users():
 
                 logging.info(f"همگام‌سازی برای subId: {sub_id} انجام شد - وضعیت: {'غیرفعال' if is_any_disabled else 'فعال'}")
 
-        # ارسال پیام تلگرام پس از اتمام همگام‌سازی
-        if user_groups:  # فقط اگر گروه‌هایی برای همگام‌سازی وجود داشت
+        if user_groups:
             message = "مصرف اینباند‌ها آپدیت شدند"
             import asyncio
             asyncio.run(send_telegram_message(message))
@@ -127,9 +116,7 @@ def sync_users():
         asyncio.run(send_telegram_message(error_message))
 
 def main():
-    # اجرای تابع sync_users هر 10 دقیقه
     schedule.every(10).minutes.do(sync_users)
-
     while True:
         schedule.run_pending()
         time.sleep(60)
