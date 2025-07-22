@@ -7,13 +7,18 @@ import logging
 import json
 
 # تنظیم لاگ‌گیری
-logging.basicConfig(filename='/opt/3x-ui-sync/subscription_page.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(filename='/opt/3x-ui-sync/subscription_page.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # خواندن تنظیمات
 CONFIG_FILE = "/opt/3x-ui-sync/config.json"
-with open(CONFIG_FILE, 'r') as f:
-    config = json.load(f)
-SUBSCRIPTION_PORT = config['subscription_port']
+try:
+    with open(CONFIG_FILE, 'r') as f:
+        config = json.load(f)
+    SUBSCRIPTION_PORT = config['subscription_port']
+except Exception as e:
+    logging.error(f"خطا در خواندن فایل تنظیمات: {str(e)}")
+    raise
+
 XUI_PANEL_URL = "http://localhost:2053"
 EXTERNAL_CONFIG_FILE = "/opt/3x-ui-sync/external_configs.txt"
 
@@ -22,6 +27,9 @@ app = FastAPI()
 def read_external_configs():
     """خواندن لینک‌های کانفیگ خارجی از فایل"""
     try:
+        if not os.path.exists(EXTERNAL_CONFIG_FILE):
+            logging.warning(f"فایل {EXTERNAL_CONFIG_FILE} وجود ندارد")
+            return []
         with open(EXTERNAL_CONFIG_FILE, 'r') as file:
             configs = [line.strip() for line in file if line.strip()]
         logging.info(f"کانفیگ‌های خارجی خوانده شدند: {configs}")
@@ -35,17 +43,19 @@ async def subscription_page(sub_id: str, request: Request):
     """ارائه پاسخ متنی خام برای نمایش در مرورگر"""
     try:
         panel_url = f"{XUI_PANEL_URL}/sub/{sub_id}"
-        response = requests.get(panel_url, headers=request.headers)
+        logging.debug(f"ارسال درخواست به پنل: {panel_url}")
+        response = requests.get(panel_url, headers=request.headers, timeout=5)
         
         if response.status_code != 200:
             logging.error(f"خطا در دریافت پاسخ از پنل: {response.status_code}")
-            return PlainTextResponse("Error fetching subscription", status_code=response.status_code)
+            return PlainTextResponse(f"Error fetching subscription: HTTP {response.status_code}", status_code=response.status_code)
 
         original_content = response.text
-        logging.info(f"پاسخ اصلی پنل دریافت شد: {original_content[:50]}...")
+        logging.debug(f"پاسخ اصلی پنل دریافت شد: {original_content[:50]}...")
 
         try:
             decoded_content = base64.b64decode(original_content).decode('utf-8')
+            logging.debug("پاسخ پنل با موفقیت دیکود شد")
         except:
             decoded_content = original_content
             logging.warning("پاسخ پنل Base64 نیست")
@@ -55,6 +65,7 @@ async def subscription_page(sub_id: str, request: Request):
         if combined_content and not combined_content.endswith('\n'):
             combined_content += '\n'
         combined_content += '\n'.join(external_configs)
+        logging.info("کانفیگ‌های ترکیبی آماده شدند")
 
         return PlainTextResponse(combined_content, status_code=200)
 
@@ -67,17 +78,20 @@ async def subscription_raw(sub_id: str, request: Request):
     """ارائه پاسخ خام Base64 برای کلاینت‌های VPN"""
     try:
         panel_url = f"{XUI_PANEL_URL}/sub/{sub_id}"
-        response = requests.get(panel_url, headers=request.headers)
+        logging.debug(f"ارسال درخواست به پنل برای پاسخ خام: {panel_url}")
+        response = requests.get(panel_url, headers=request.headers, timeout=5)
         
         if response.status_code != 200:
             logging.error(f"خطا در دریافت پاسخ از پنل: {response.status_code}")
-            return PlainTextResponse("Error fetching subscription", status_code=response.status_code)
+            return PlainTextResponse(f"Error fetching subscription: HTTP {response.status_code}", status_code=response.status_code)
 
         original_content = response.text
         try:
             decoded_content = base64.b64decode(original_content).decode('utf-8')
+            logging.debug("پاسخ خام پنل با موفقیت دیکود شد")
         except:
             decoded_content = original_content
+            logging.warning("پاسخ خام پنل Base64 نیست")
 
         external_configs = read_external_configs()
         combined_content = decoded_content
@@ -86,6 +100,7 @@ async def subscription_raw(sub_id: str, request: Request):
         combined_content += '\n'.join(external_configs)
 
         encoded_content = base64.b64encode(combined_content.encode('utf-8')).decode('utf-8')
+        logging.info("پاسخ خام Base64 آماده شد")
         return PlainTextResponse(encoded_content, status_code=200)
 
     except Exception as e:
@@ -93,4 +108,5 @@ async def subscription_raw(sub_id: str, request: Request):
         return PlainTextResponse(f"Error: {str(e)}", status_code=500)
 
 if __name__ == "__main__":
+    logging.info(f"شروع سرویس subscription_page روی پورت {SUBSCRIPTION_PORT}")
     uvicorn.run(app, host="0.0.0.0", port=SUBSCRIPTION_PORT)
