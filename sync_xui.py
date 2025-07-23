@@ -2,7 +2,7 @@ import sqlite3
 import time
 import schedule
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
 from datetime import datetime
 import json
 import logging
@@ -16,8 +16,10 @@ TELEGRAM_BOT_TOKEN = "8036904228:AAELw-wxr92SPpsfHPlJcIITCg8bHdukJss"  # توک�
 TELEGRAM_CHAT_ID = "54515010"     # شناسه مدیر یا کانال
 DB_PATH = "/etc/x-ui/x-ui.db"     # مسیر پایگاه داده 3X-UI
 
-# متغیر برای کنترل وضعیت همگام‌سازی
+# متغیرهای جهانی
 is_sync_running = True
+sync_interval = 10  # بازه زمانی پیش‌فرض (دقیقه)
+INPUT_INTERVAL = range(1)  # حالت‌های ConversationHandler
 
 async def send_telegram_message(message):
     """ارسال پیام به تلگرام"""
@@ -31,19 +33,15 @@ async def send_telegram_message(message):
 def sync_users():
     """همگام‌سازی ترافیک، تاریخ انقضا و وضعیت فعال/غیرفعال کاربران با subId یکسان"""
     try:
-        # اتصال به پایگاه داده
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
-        # دریافت تمام اطلاعات ترافیک
         cursor.execute("SELECT id, inbound_id, email, up, down, expiry_time, enable FROM client_traffics")
         traffics = cursor.fetchall()
 
-        # دریافت تنظیمات اینباند‌ها برای استخراج subId و total
         cursor.execute("SELECT id, settings FROM inbounds")
         inbounds = cursor.fetchall()
 
-        # ایجاد دیکشنری برای نگاشت inbound_id و email به subId و total
         inbound_to_subid = {}
         inbound_to_total = {}
         for inbound_id, settings in inbounds:
@@ -61,7 +59,6 @@ def sync_users():
                 logging.warning(f"خطا در تجزیه JSON برای inbound_id: {inbound_id}")
                 continue
 
-        # گروه‌بندی کاربران بر اساس subId
         user_groups = {}
         for traffic in traffics:
             traffic_id, inbound_id, email, up, down, expiry_time, enable = traffic
@@ -71,37 +68,29 @@ def sync_users():
                     user_groups[sub_id] = []
                 user_groups[sub_id].append(traffic)
 
-        # چاپ گروه‌ها برای عیب‌یابی
         logging.info(f"گروه‌های کاربران: {user_groups}")
 
-        # همگام‌سازی ترافیک، تاریخ انقضا و وضعیت فعال/غیرفعال
         for sub_id, group in user_groups.items():
-            if len(group) > 1:  # فقط کاربران با subId یکسان در اینباندهای مختلف
-                # انتخاب بیشترین مقدار ترافیک و انقضا
+            if len(group) > 1:
                 max_up = max(traffic[3] for traffic in group if traffic[3] is not None)
                 max_down = max(traffic[4] for traffic in group if traffic[4] is not None)
                 max_expiry = max(traffic[5] for traffic in group if traffic[5] is not None)
 
-                # بررسی وضعیت غیرفعال بودن (اتمام حجم یا زمان)
                 is_any_disabled = False
                 for traffic in group:
                     traffic_id, inbound_id, email, up, down, expiry_time, enable = traffic
                     total = inbound_to_total.get((inbound_id, email), 0)
-                    # بررسی اتمام حجم
                     if total > 0 and (up + down) >= total:
                         is_any_disabled = True
                         break
-                    # بررسی اتمام زمان
-                    current_time = int(time.time() * 1000)  # زمان فعلی به میلی‌ثانیه
+                    current_time = int(time.time() * 1000)
                     if expiry_time > 0 and expiry_time <= current_time:
                         is_any_disabled = True
                         break
-                    # بررسی غیرفعال بودن
                     if enable == 0:
                         is_any_disabled = True
                         break
 
-                # به‌روزرسانی تمام کاربران در گروه
                 for traffic in group:
                     traffic_id = traffic[0]
                     enable_status = 0 if is_any_disabled else 1
@@ -112,8 +101,7 @@ def sync_users():
 
                 logging.info(f"همگام‌سازی برای subId: {sub_id} انجام شد - وضعیت: {'غیرفعال' if is_any_disabled else 'فعال'}")
 
-        # ارسال پیام تلگرام پس از اتمام همگام‌سازی
-        if user_groups:  # فقط اگر گروه‌هایی برای همگام‌سازی وجود داشت
+        if user_groups:
             message = "مصرف اینباند‌ها آپدیت شدند"
             asyncio.run(send_telegram_message(message))
 
@@ -132,29 +120,61 @@ async def start(update, context):
         [InlineKeyboardButton("شروع همگام‌سازی", callback_data='start_sync')],
         [InlineKeyboardButton("توقف همگام‌سازی", callback_data='stop_sync')],
         [InlineKeyboardButton("بررسی وضعیت", callback_data='status')],
+        [InlineKeyboardButton("تغییر مدت زمان", callback_data='change_interval')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("لطفاً یک گزینه را انتخاب کنید:", reply_markup=reply_markup)
+    return ConversationHandler.END
 
 async def button_callback(update, context):
     """مدیریت کلیک روی دکمه‌های Inline"""
-    global is_sync_running
+    global is_sync_running, sync_interval
     query = update.callback_query
     await query.answer()
 
     if query.data == 'start_sync':
         is_sync_running = True
+        schedule.clear()
+        schedule.every(sync_interval).minutes.do(sync_users)
         await query.message.reply_text("همگام‌سازی شروع شد.")
         logging.info("همگام‌سازی توسط کاربر شروع شد")
     elif query.data == 'stop_sync':
         is_sync_running = False
-        schedule.clear()  # پاک کردن تمام وظایف زمان‌بندی‌شده
+        schedule.clear()
         await query.message.reply_text("همگام‌سازی متوقف شد.")
         logging.info("همگام‌سازی توسط کاربر متوقف شد")
     elif query.data == 'status':
         status = "در حال اجرا" if is_sync_running else "متوقف"
-        await query.message.reply_text(f"وضعیت همگام‌سازی: {status}")
+        await query.message.reply_text(f"وضعیت همگام‌سازی: {status}\nمدت زمان همگام‌سازی: {sync_interval} دقیقه")
         logging.info(f"وضعیت بررسی شد: {status}")
+    elif query.data == 'change_interval':
+        await query.message.reply_text("لطفاً مدت زمان همگام‌سازی (به دقیقه) را وارد کنید:")
+        return INPUT_INTERVAL
+    return ConversationHandler.END
+
+async def set_interval(update, context):
+    """دریافت و اعمال مدت زمان جدید همگام‌سازی"""
+    global sync_interval, is_sync_running
+    try:
+        new_interval = int(update.message.text)
+        if new_interval <= 0:
+            await update.message.reply_text("لطفاً یک عدد مثبت وارد کنید.")
+            return INPUT_INTERVAL
+        sync_interval = new_interval
+        if is_sync_running:
+            schedule.clear()
+            schedule.every(sync_interval).minutes.do(sync_users)
+        await update.message.reply_text(f"مدت زمان همگام‌سازی به {sync_interval} دقیقه تغییر کرد.")
+        logging.info(f"مدت زمان همگام‌سازی به {sync_interval} دقیقه تغییر کرد")
+        return ConversationHandler.END
+    except ValueError:
+        await update.message.reply_text("لطفاً یک عدد معتبر وارد کنید.")
+        return INPUT_INTERVAL
+
+async def cancel(update, context):
+    """لغو عملیات تغییر مدت زمان"""
+    await update.message.reply_text("عملیات لغو شد.")
+    return ConversationHandler.END
 
 def run_schedule():
     """اجرای وظایف زمان‌بندی‌شده"""
@@ -165,12 +185,23 @@ def run_schedule():
 
 def main():
     """نقطه ورود اصلی برنامه"""
-    # تنظیم زمان‌بندی همگام‌سازی هر 10 دقیقه
-    schedule.every(10).minutes.do(sync_users)
+    # تنظیم زمان‌بندی پیش‌فرض
+    schedule.every(sync_interval).minutes.do(sync_users)
 
     # تنظیم ربات تلگرام
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # تنظیم ConversationHandler برای تغییر مدت زمان
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_callback, pattern='^change_interval$')],
+        states={
+            INPUT_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_interval)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(button_callback))
 
     # اجرای ربات و زمان‌بندی در تردهای جداگانه
