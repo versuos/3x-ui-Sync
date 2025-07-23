@@ -1,7 +1,7 @@
 import sqlite3
 import time
 import schedule
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
 from datetime import datetime
 import json
@@ -115,42 +115,41 @@ def sync_users():
         asyncio.run(send_telegram_message(error_message))
 
 async def start(update, context):
-    """نمایش منوی Inline با دستور /start"""
+    """نمایش کیبورد Reply با دستور /start"""
     keyboard = [
         [
-            InlineKeyboardButton("شروع", callback_data='start_sync'),
-            InlineKeyboardButton("توقف", callback_data='stop_sync'),
-            InlineKeyboardButton("وضعیت", callback_data='status'),
-            InlineKeyboardButton("تغییر زمان", callback_data='change_interval'),
+            KeyboardButton("شروع"),
+            KeyboardButton("توقف"),
+            KeyboardButton("وضعیت"),
+            KeyboardButton("تغییر زمان"),
         ]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     await update.message.reply_text("گزینه مورد نظر را انتخاب کنید:", reply_markup=reply_markup)
     return ConversationHandler.END
 
-async def button_callback(update, context):
-    """مدیریت کلیک روی دکمه‌های Inline"""
+async def handle_button(update, context):
+    """مدیریت کلیک روی دکمه‌های Reply Keyboard"""
     global is_sync_running, sync_interval
-    query = update.callback_query
-    await query.answer()
+    message_text = update.message.text
 
-    if query.data == 'start_sync':
+    if message_text == "شروع":
         is_sync_running = True
         schedule.clear()
         schedule.every(sync_interval).minutes.do(sync_users)
-        await query.message.reply_text("همگام‌سازی شروع شد.")
+        await update.message.reply_text("همگام‌سازی شروع شد.")
         logging.info("همگام‌سازی توسط کاربر شروع شد")
-    elif query.data == 'stop_sync':
+    elif message_text == "توقف":
         is_sync_running = False
         schedule.clear()
-        await query.message.reply_text("همگام‌سازی متوقف شد.")
+        await update.message.reply_text("همگام‌سازی متوقف شد.")
         logging.info("همگام‌سازی توسط کاربر متوقف شد")
-    elif query.data == 'status':
+    elif message_text == "وضعیت":
         status = "در حال اجرا" if is_sync_running else "متوقف"
-        await query.message.reply_text(f"وضعیت: {status}\nزمان همگام‌سازی: {sync_interval} دقیقه")
+        await update.message.reply_text(f"وضعیت: {status}\nزمان همگام‌سازی: {sync_interval} دقیقه")
         logging.info(f"وضعیت بررسی شد: {status}")
-    elif query.data == 'change_interval':
-        await query.message.reply_text("مدت زمان جدید (دقیقه) را وارد کنید:")
+    elif message_text == "تغییر زمان":
+        await update.message.reply_text("مدت زمان جدید (دقیقه) را وارد کنید:")
         return INPUT_INTERVAL
     return ConversationHandler.END
 
@@ -195,7 +194,7 @@ def main():
     
     # تنظیم ConversationHandler برای تغییر مدت زمان
     conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_callback, pattern='^change_interval$')],
+        entry_points=[MessageHandler(filters.Regex('^(تغییر زمان)$'), handle_button)],
         states={
             INPUT_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_interval)],
         },
@@ -204,7 +203,7 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
-    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.Regex('^(شروع|توقف|وضعیت|تغییر زمان)$'), handle_button))
 
     # اجرای ربات و زمان‌بندی در تردهای جداگانه
     loop = asyncio.get_event_loop()
