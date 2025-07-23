@@ -3,25 +3,55 @@ import time
 import schedule
 import json
 import logging
-import asyncio  # اضافه کردن asyncio
+import asyncio
+import threading
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
-# تنظیم لاگ‌گیری
-logging.basicConfig(filename='/opt/3x-ui-sync/sync_xui.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# تنظیم لاگ‌گیری با جزئیات بیشتر
+logging.basicConfig(
+    filename='/opt/3x-ui-sync/sync_xui.log',
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # مسیر فایل تنظیمات و پایگاه داده
 CONFIG_PATH = "/opt/3x-ui-sync/config.json"
 DB_PATH = "/etc/x-ui/x-ui.db"
+PID_FILE = "/tmp/3x-ui-sync.pid"
 
 # حالت‌های ConversationHandler
 SET_TOKEN, SET_CHATID, SET_INTERVAL = range(3)
+
+# بررسی و جلوگیری از اجرای چندین نمونه
+def check_single_instance():
+    if os.path.exists(PID_FILE):
+        with open(PID_FILE, 'r') as f:
+            pid = f.read().strip()
+            try:
+                os.kill(int(pid), 0)
+                logging.error(f"برنامه در حال اجرا است با PID: {pid}. خروج...")
+                raise SystemExit("برنامه قبلاً در حال اجرا است!")
+            except (OSError, ValueError):
+                pass
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    logging.debug(f"PID برنامه: {os.getpid()}")
+
+# حذف فایل PID هنگام خروج
+def cleanup_pid_file():
+    if os.path.exists(PID_FILE):
+        os.remove(PID_FILE)
+        logging.debug("فایل PID حذف شد")
 
 # بارگذاری تنظیمات
 def load_config():
     try:
         with open(CONFIG_PATH, 'r') as f:
-            return json.load(f)
+            config = json.load(f)
+            logging.debug(f"تنظیمات بارگذاری شد: {config}")
+            return config
     except Exception as e:
         logging.error(f"خطا در بارگذاری تنظیمات: {str(e)}")
         return None
@@ -47,13 +77,16 @@ async def send_telegram_message(token, chat_id, message):
 
 # تابع بررسی دسترسی ادمین
 def check_admin(update: Update, config):
-    return str(update.effective_chat.id) == config['TELEGRAM_CHAT_ID']
+    is_admin = str(update.effective_chat.id) == config['TELEGRAM_CHAT_ID']
+    logging.debug(f"بررسی دسترسی ادمین: چت آیدی={update.effective_chat.id}, نتیجه={is_admin}")
+    return is_admin
 
 # دستور /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     if not config or not check_admin(update, config):
         await update.message.reply_text("دسترسی غیرمجاز!")
+        logging.info(f"تلاش غیرمجاز برای دسترسی از چت آیدی: {update.effective_chat.id}")
         return
 
     keyboard = [
@@ -66,6 +99,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "به ربات 3X-UI User Sync خوش آمدید!\nیکی از گزینه‌ها را انتخاب کنید:",
         reply_markup=reply_markup
     )
+    logging.info(f"منوی دکمه‌ای برای چت آیدی {update.effective_chat.id} ارسال شد")
 
 # مدیریت انتخاب دکمه‌ها
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -74,6 +108,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     if not config or not check_admin(query, config):
         await query.message.reply_text("دسترسی غیرمجاز!")
+        logging.info(f"تلاش غیرمجاز برای دسترسی از چت آیدی: {query.effective_chat.id}")
         return ConversationHandler.END
 
     if query.data == 'set_token':
@@ -91,6 +126,7 @@ async def receive_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     if not config or not check_admin(update, config):
         await update.message.reply_text("دسترسی غیرمجاز!")
+        logging.info(f"تلاش غیرمجاز برای دسترسی از چت آیدی: {update.effective_chat.id}")
         return ConversationHandler.END
 
     token = update.message.text.strip()
@@ -105,6 +141,7 @@ async def receive_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     if not config or not check_admin(update, config):
         await update.message.reply_text("دسترسی غیرمجاز!")
+        logging.info(f"تلاش غیرمجاز برای دسترسی از چت آیدی: {update.effective_chat.id}")
         return ConversationHandler.END
 
     chat_id = update.message.text.strip()
@@ -119,6 +156,7 @@ async def receive_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     if not config or not check_admin(update, config):
         await update.message.reply_text("دسترسی غیرمجاز!")
+        logging.info(f"تلاش غیرمجاز برای دسترسی از چت آیدی: {update.effective_chat.id}")
         return ConversationHandler.END
 
     interval = update.message.text.strip()
@@ -136,6 +174,7 @@ async def receive_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # لغو عملیات
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("عملیات لغو شد.")
+    logging.info(f"عملیات توسط چت آیدی {update.effective_chat.id} لغو شد")
     return ConversationHandler.END
 
 # تابع همگام‌سازی کاربران
@@ -206,7 +245,15 @@ def sync_users():
         if user_groups:
             config = load_config()
             if config:
-                asyncio.run(send_telegram_message(config['TELEGRAM_BOT_TOKEN'], config['TELEGRAM_CHAT_ID'], "مصرف اینباند‌ها آپدیت شدند"))
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(
+                        send_telegram_message(config['TELEGRAM_BOT_TOKEN'], config['TELEGRAM_CHAT_ID'], "مصرف اینباند‌ها آپدیت شدند")
+                    )
+                    loop.close()
+                except Exception as e:
+                    logging.error(f"خطا در ارسال اعلان همگام‌سازی: {str(e)}")
         conn.commit()
         conn.close()
         logging.info("همگام‌سازی با موفقیت انجام شد")
@@ -216,42 +263,88 @@ def sync_users():
         logging.error(error_message)
         config = load_config()
         if config:
-            asyncio.run(send_telegram_message(config['TELEGRAM_BOT_TOKEN'], config['TELEGRAM_CHAT_ID'], error_message))
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(
+                    send_telegram_message(config['TELEGRAM_BOT_TOKEN'], config['TELEGRAM_CHAT_ID'], error_message)
+                )
+                loop.close()
+            except Exception as e:
+                logging.error(f"خطا در ارسال اعلان خطا: {str(e)}")
+
+# تابع برای اجرای زمان‌بندی در یک thread جداگانه
+def run_schedule():
+    logging.debug("شروع thread زمان‌بندی")
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
 
 # تابع اصلی
-def main():
+async def main():
+    # بررسی اجرای تک‌نمونه
+    check_single_instance()
+
     # بارگذاری تنظیمات
     config = load_config()
     if not config:
         logging.error("نمی‌توان تنظیمات را بارگذاری کرد. خروج...")
         return
 
-    # راه‌اندازی ربات تلگرام
-    application = Application.builder().token(config['TELEGRAM_BOT_TOKEN']).build()
-    
-    # تعریف ConversationHandler با تنظیم per_message=True برای رفع هشدار
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start), CallbackQueryHandler(button)],
-        states={
-            SET_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_token)],
-            SET_CHATID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_chatid)],
-            SET_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_interval)]
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-        per_message=True  # رفع هشدار PTBUserWarning
-    )
-    application.add_handler(conv_handler)
+    # راه‌اندازی ربات تلگرامی
+    application = None
+    try:
+        application = Application.builder().token(config['TELEGRAM_BOT_TOKEN']).build()
+        logging.debug("Application ساخته شد")
 
-    # زمان‌بندی همگام‌سازی
-    schedule.every(config['SYNC_INTERVAL']).minutes.do(sync_users)
+        # تعریف ConversationHandler
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('start', start)],
+            states={
+                SET_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_token)],
+                SET_CHATID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_chatid)],
+                SET_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_interval)]
+            },
+            fallbacks=[CommandHandler('cancel', cancel)],
+        )
+        application.add_handler(conv_handler)
+        application.add_handler(CallbackQueryHandler(button))
+        logging.debug("هندلرهای ربات اضافه شدند")
 
-    # اجرای ربات و زمان‌بندی به‌صورت همزمان
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.create_task(application.run_polling())
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
+        # زمان‌بندی همگام‌سازی
+        schedule.every(config['SYNC_INTERVAL']).minutes.do(sync_users)
+        logging.debug(f"زمان‌بندی تنظیم شد: هر {config['SYNC_INTERVAL']} دقیقه")
 
+        # اجرای زمان‌بندی در thread جداگانه
+        threading.Thread(target=run_schedule, daemon=True).start()
+        logging.debug("Thread زمان‌بندی شروع شد")
+
+        # مقداردهی اولیه و اجرای ربات
+        await application.initialize()
+        logging.info("ربات تلگرامی با موفقیت مقداردهی اولیه شد")
+        await application.start()
+        logging.info("ربات تلگرامی شروع شد")
+        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+        logging.info("ربات تلگرامی با موفقیت اجرا شد")
+
+    except Exception as e:
+        logging.error(f"خطا در اجرای ربات تلگرامی: {str(e)}", exc_info=True)
+    finally:
+        if application:
+            try:
+                await application.stop()
+                logging.info("ربات تلگرامی متوقف شد")
+                await application.shutdown()
+                logging.info("ربات تلگرامی خاموش شد")
+            except Exception as e:
+                logging.error(f"خطا در توقف ربات تلگرامی: {str(e)}", exc_info=True)
+        cleanup_pid_file()
+
+# اجرای برنامه
 if __name__ == "__main__":
-    main()
+    logging.debug("شروع برنامه")
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logging.error(f"خطا در اجرای برنامه: {str(e)}", exc_info=True)
+        cleanup_pid_file()
