@@ -117,13 +117,15 @@ def sync_users():
 async def start(update, context):
     """نمایش منوی Inline با دستور /start"""
     keyboard = [
-        [InlineKeyboardButton("شروع همگام‌سازی", callback_data='start_sync')],
-        [InlineKeyboardButton("توقف همگام‌سازی", callback_data='stop_sync')],
-        [InlineKeyboardButton("بررسی وضعیت", callback_data='status')],
-        [InlineKeyboardButton("تغییر مدت زمان", callback_data='change_interval')],
+        [
+            InlineKeyboardButton("شروع", callback_data='start_sync'),
+            InlineKeyboardButton("توقف", callback_data='stop_sync'),
+            InlineKeyboardButton("وضعیت", callback_data='status'),
+            InlineKeyboardButton("تغییر زمان", callback_data='change_interval'),
+        ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("لطفاً یک گزینه را انتخاب کنید:", reply_markup=reply_markup)
+    await update.message.reply_text("گزینه مورد نظر را انتخاب کنید:", reply_markup=reply_markup)
     return ConversationHandler.END
 
 async def button_callback(update, context):
@@ -145,10 +147,10 @@ async def button_callback(update, context):
         logging.info("همگام‌سازی توسط کاربر متوقف شد")
     elif query.data == 'status':
         status = "در حال اجرا" if is_sync_running else "متوقف"
-        await query.message.reply_text(f"وضعیت همگام‌سازی: {status}\nمدت زمان همگام‌سازی: {sync_interval} دقیقه")
+        await query.message.reply_text(f"وضعیت: {status}\nزمان همگام‌سازی: {sync_interval} دقیقه")
         logging.info(f"وضعیت بررسی شد: {status}")
     elif query.data == 'change_interval':
-        await query.message.reply_text("لطفاً مدت زمان همگام‌سازی (به دقیقه) را وارد کنید:")
+        await query.message.reply_text("مدت زمان جدید (دقیقه) را وارد کنید:")
         return INPUT_INTERVAL
     return ConversationHandler.END
 
@@ -158,17 +160,17 @@ async def set_interval(update, context):
     try:
         new_interval = int(update.message.text)
         if new_interval <= 0:
-            await update.message.reply_text("لطفاً یک عدد مثبت وارد کنید.")
+            await update.message.reply_text("لطفاً عدد مثبت وارد کنید.")
             return INPUT_INTERVAL
         sync_interval = new_interval
         if is_sync_running:
             schedule.clear()
             schedule.every(sync_interval).minutes.do(sync_users)
-        await update.message.reply_text(f"مدت زمان همگام‌سازی به {sync_interval} دقیقه تغییر کرد.")
+        await update.message.reply_text(f"زمان همگام‌سازی به {sync_interval} دقیقه تغییر کرد.")
         logging.info(f"مدت زمان همگام‌سازی به {sync_interval} دقیقه تغییر کرد")
         return ConversationHandler.END
     except ValueError:
-        await update.message.reply_text("لطفاً یک عدد معتبر وارد کنید.")
+        await update.message.reply_text("لطفاً عدد معتبر وارد کنید.")
         return INPUT_INTERVAL
 
 async def cancel(update, context):
