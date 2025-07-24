@@ -1,8 +1,9 @@
 import sqlite3
 import time
 import schedule
+import requests
 from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler, filters
 from datetime import datetime
 import json
 import logging
@@ -19,7 +20,7 @@ DB_PATH = "/etc/x-ui/x-ui.db"     # مسیر پایگاه داده 3X-UI
 # متغیرهای جهانی
 is_sync_running = True
 sync_interval = 10  # بازه زمانی پیش‌فرض (دقیقه)
-INPUT_INTERVAL = range(1)  # حالت‌های ConversationHandler
+INPUT_INTERVAL, INPUT_CONFIG_LINK = range(2)  # حالت‌های ConversationHandler
 
 async def send_telegram_message(message):
     """ارسال پیام به تلگرام"""
@@ -31,19 +32,21 @@ async def send_telegram_message(message):
         logging.error(f"خطا در ارسال پیام تلگرام: {str(e)}")
 
 def sync_users():
-    """همگام‌سازی ترافیک، تاریخ انقضا و وضعیت فعال/غیرفعال کاربران با subId یکسان"""
+    """همگام‌سازی ترافیک و افزودن کانفیگ خارجی به لینک سابسکریپشن"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
+        # دریافت اطلاعات کاربران
         cursor.execute("SELECT id, inbound_id, email, up, down, expiry_time, enable FROM client_traffics")
         traffics = cursor.fetchall()
 
+        # دریافت تنظیمات اینباند‌ها
         cursor.execute("SELECT id, settings FROM inbounds")
         inbounds = cursor.fetchall()
 
+        # گروه‌بندی بر اساس subId
         inbound_to_subid = {}
-        inbound_to_total = {}
         for inbound_id, settings in inbounds:
             try:
                 settings_json = json.loads(settings)
@@ -51,10 +54,8 @@ def sync_users():
                 for client in clients:
                     sub_id = client.get("subId")
                     email = client.get("email")
-                    total = client.get("total", 0)
                     if sub_id and email:
                         inbound_to_subid[(inbound_id, email)] = sub_id
-                        inbound_to_total[(inbound_id, email)] = total
             except json.JSONDecodeError:
                 logging.warning(f"خطا در تجزیه JSON برای inbound_id: {inbound_id}")
                 continue
@@ -66,33 +67,38 @@ def sync_users():
             if sub_id:
                 if sub_id not in user_groups:
                     user_groups[sub_id] = []
-                user_groups[sub_id].append(traffic)
+                user_groups[sub_id].append((traffic_id, inbound_id, email))
 
-        logging.info(f"گروه‌های کاربران: {user_groups}")
-
+        # همگام‌سازی و مدیریت کانفیگ
         for sub_id, group in user_groups.items():
-            if len(group) > 1:
-                max_up = max(traffic[3] for traffic in group if traffic[3] is not None)
-                max_down = max(traffic[4] for traffic in group if traffic[4] is not None)
-                max_expiry = max(traffic[5] for traffic in group if traffic[5] is not None)
+            if len(group) > 1:  # فقط گروه‌های با بیش از یک کاربر
+                # انتخاب نماینده (اولین کاربر)
+                representative = group[0]
+                rep_traffic_id, rep_inbound_id, rep_email = representative
 
+                # محاسبه حداکثر ترافیک و انقضا
+                max_up = max(traffic[3] for traffic in traffics if traffic[1] in [g[1] for g in group] and traffic[3] is not None)
+                max_down = max(traffic[4] for traffic in traffics if traffic[1] in [g[1] for g in group] and traffic[4] is not None)
+                max_expiry = max(traffic[5] for traffic in traffics if traffic[1] in [g[1] for g in group] and traffic[5] is not None)
+
+                # بررسی وضعیت غیرفعال
                 is_any_disabled = False
-                for traffic in group:
-                    traffic_id, inbound_id, email, up, down, expiry_time, enable = traffic
-                    total = inbound_to_total.get((inbound_id, email), 0)
-                    if total > 0 and (up + down) >= total:
-                        is_any_disabled = True
-                        break
-                    current_time = int(time.time() * 1000)
-                    if expiry_time > 0 and expiry_time <= current_time:
-                        is_any_disabled = True
-                        break
-                    if enable == 0:
-                        is_any_disabled = True
-                        break
+                for traffic in traffics:
+                    if traffic[1] in [g[1] for g in group]:
+                        total = next((inbound_to_total.get((traffic[1], traffic[2]), 0) for _, settings in inbounds if _ == traffic[1]), 0)
+                        if total > 0 and (traffic[3] + traffic[4]) >= total:
+                            is_any_disabled = True
+                            break
+                        current_time = int(time.time() * 1000)
+                        if traffic[5] > 0 and traffic[5] <= current_time:
+                            is_any_disabled = True
+                            break
+                        if traffic[6] == 0:
+                            is_any_disabled = True
+                            break
 
-                for traffic in group:
-                    traffic_id = traffic[0]
+                # به‌روزرسانی همه کاربران گروه
+                for traffic_id, inbound_id, email in group:
                     enable_status = 0 if is_any_disabled else 1
                     cursor.execute(
                         "UPDATE client_traffics SET up = ?, down = ?, expiry_time = ?, enable = ? WHERE id = ?",
@@ -122,6 +128,7 @@ async def start(update, context):
             KeyboardButton("توقف"),
             KeyboardButton("وضعیت"),
             KeyboardButton("تغییر زمان"),
+            KeyboardButton("اضافه کردن لینک کانفیگ"),
         ]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
@@ -151,7 +158,83 @@ async def handle_button(update, context):
     elif message_text == "تغییر زمان":
         await update.message.reply_text("مدت زمان جدید (دقیقه) را وارد کنید:")
         return INPUT_INTERVAL
+    elif message_text == "اضافه کردن لینک کانفیگ":
+        await update.message.reply_text("لینک کانفیگ JSON را ارسال کنید (مثلاً https://example.com/config.json):")
+        return INPUT_CONFIG_LINK
     return ConversationHandler.END
+
+async def add_config_from_link(update, context):
+    """دریافت و اضافه کردن کانفیگ از لینک"""
+    try:
+        link = update.message.text
+        response = requests.get(link)
+        response.raise_for_status()  # بررسی خطا در درخواست
+        config_data = response.json()
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # دریافت اطلاعات کاربران و اینباند‌ها
+        cursor.execute("SELECT id, inbound_id, email FROM client_traffics")
+        traffics = cursor.fetchall()
+        cursor.execute("SELECT id, settings FROM inbounds")
+        inbounds = cursor.fetchall()
+
+        # گروه‌بندی بر اساس subId
+        inbound_to_subid = {}
+        for inbound_id, settings in inbounds:
+            try:
+                settings_json = json.loads(settings)
+                clients = settings_json.get("clients", [])
+                for client in clients:
+                    sub_id = client.get("subId")
+                    email = client.get("email")
+                    if sub_id and email:
+                        inbound_to_subid[(inbound_id, email)] = sub_id
+            except json.JSONDecodeError:
+                logging.warning(f"خطا در تجزیه JSON برای inbound_id: {inbound_id}")
+                continue
+
+        user_groups = {}
+        for traffic_id, inbound_id, email in traffics:
+            sub_id = inbound_to_subid.get((inbound_id, email))
+            if sub_id:
+                if sub_id not in user_groups:
+                    user_groups[sub_id] = []
+                user_groups[sub_id].append((traffic_id, inbound_id, email))
+
+        # افزودن کانفیگ به نماینده هر گروه
+        for sub_id, group in user_groups.items():
+            if group:
+                representative = group[0]
+                rep_traffic_id, rep_inbound_id, rep_email = representative
+                cursor.execute("SELECT settings FROM inbounds WHERE id = ?", (rep_inbound_id,))
+                settings = cursor.fetchone()
+                if settings:
+                    settings_json = json.loads(settings[0])
+                    external_clients = config_data.get("clients", [])
+                    if external_clients:
+                        settings_json["clients"].extend(external_clients)
+                        cursor.execute(
+                            "UPDATE inbounds SET settings = ? WHERE id = ?",
+                            (json.dumps(settings_json), rep_inbound_id)
+                        )
+                        logging.info(f"کانفیگ از لینک {link} به inbound_id {rep_inbound_id} اضافه شد")
+
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(f"کانفیگ از لینک {link} با موفقیت اضافه شد.")
+        return ConversationHandler.END
+    except requests.RequestException as e:
+        await update.message.reply_text(f"خطا در دانلود لینک: {str(e)}")
+        return INPUT_CONFIG_LINK
+    except json.JSONDecodeError:
+        await update.message.reply_text("فرمت JSON نادرست است. لطفاً لینک معتبر را امتحان کنید.")
+        return INPUT_CONFIG_LINK
+    except Exception as e:
+        await update.message.reply_text(f"خطا: {str(e)}")
+        logging.error(f"خطا در افزودن کانفیگ از لینک: {str(e)}")
+        return INPUT_CONFIG_LINK
 
 async def set_interval(update, context):
     """دریافت و اعمال مدت زمان جدید همگام‌سازی"""
@@ -173,7 +256,7 @@ async def set_interval(update, context):
         return INPUT_INTERVAL
 
 async def cancel(update, context):
-    """لغو عملیات تغییر مدت زمان"""
+    """لغو عملیات تغییر مدت زمان یا افزودن لینک"""
     await update.message.reply_text("عملیات لغو شد.")
     return ConversationHandler.END
 
@@ -192,18 +275,21 @@ def main():
     # تنظیم ربات تلگرام
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # تنظیم ConversationHandler برای تغییر مدت زمان
+    # تنظیم ConversationHandler برای تغییر مدت زمان و افزودن لینک کانفیگ
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^(تغییر زمان)$'), handle_button)],
+        entry_points=[
+            MessageHandler(filters.Regex('^(تغییر زمان|اضافه کردن لینک کانفیگ)$'), handle_button)
+        ],
         states={
             INPUT_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_interval)],
+            INPUT_CONFIG_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_from_link)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
-    application.add_handler(MessageHandler(filters.Regex('^(شروع|توقف|وضعیت|تغییر زمان)$'), handle_button))
+    application.add_handler(MessageHandler(filters.Regex('^(شروع|توقف|وضعیت|تغییر زمان|اضافه کردن لینک کانفیگ)$'), handle_button))
 
     # اجرای ربات و زمان‌بندی در تردهای جداگانه
     loop = asyncio.get_event_loop()
