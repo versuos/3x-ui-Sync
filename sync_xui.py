@@ -1,7 +1,6 @@
 import sqlite3
 import time
 import schedule
-import requests
 import urllib.parse
 from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler, filters
@@ -129,7 +128,7 @@ async def start(update, context):
             KeyboardButton("توقف"),
             KeyboardButton("وضعیت"),
             KeyboardButton("تغییر زمان"),
-            KeyboardButton("اضافه کردن لینک vless"),
+            KeyboardButton("اضافه کردن لینک v2ray"),
         ]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
@@ -159,62 +158,87 @@ async def handle_button(update, context):
     elif message_text == "تغییر زمان":
         await update.message.reply_text("مدت زمان جدید (دقیقه) را وارد کنید:")
         return INPUT_INTERVAL
-    elif message_text == "اضافه کردن لینک vless":
-        await update.message.reply_text("لینک vless (مثل vless://...) را ارسال کنید:")
+    elif message_text == "اضافه کردن لینک v2ray":
+        await update.message.reply_text("لینک v2ray (vmess/vless/trojan) را ارسال کنید (مثل vmess://... یا vless://...):")
         return INPUT_VLESS_LINK
     return ConversationHandler.END
 
-async def add_vless_config(update, context):
-    """دریافت و اضافه کردن کانفیگ vless از لینک"""
+async def add_v2ray_config(update, context):
+    """دریافت و اضافه کردن کانفیگ v2ray از لینک"""
     try:
-        vless_link = update.message.text
-        # تحلیل لینک vless
-        if not vless_link.startswith("vless://"):
-            raise ValueError("لینک معتبر vless نیست.")
-        
-        # استخراج بخش‌های لینک
-        parsed_url = urllib.parse.urlparse(vless_link.replace("vless://", ""))
-        user_info = urllib.parse.unquote(parsed_url.username)
-        host, port = parsed_url.hostname, parsed_url.port or 443
-        params = urllib.parse.parse_qs(parsed_url.query)
-        fragment = urllib.parse.unquote(parsed_url.fragment)
+        link = update.message.text.strip()
+        if not link.startswith(("vmess://", "vless://", "trojan://")):
+            raise ValueError("لینک معتبر v2ray (vmess/vless/trojan) نیست.")
+
+        # استخراج اطلاعات از لینک
+        if link.startswith("vmess://"):
+            decoded = base64.b64decode(link.replace("vmess://", "")).decode('utf-8')
+            config = json.loads(decoded)
+            protocol = "vmess"
+            user_id = config.get("id")
+            host = config.get("add")
+            port = config.get("port")
+            security = config.get("security", "auto")
+            network = config.get("net", "tcp")
+            sni = config.get("sni", "")
+        elif link.startswith("vless://"):
+            parsed_url = urllib.parse.urlparse(link.replace("vless://", ""))
+            user_id = urllib.parse.unquote(parsed_url.username)
+            host = parsed_url.hostname if parsed_url.hostname else ""
+            port = parsed_url.port if parsed_url.port else 443
+            params = urllib.parse.parse_qs(parsed_url.query)
+            protocol = "vless"
+            security = params.get("security", ["none"])[0]
+            network = params.get("type", ["tcp"])[0]
+            sni = params.get("sni", [""])[0][0]
+        elif link.startswith("trojan://"):
+            parsed_url = urllib.parse.urlparse(link.replace("trojan://", ""))
+            user_id = urllib.parse.unquote(parsed_url.username)
+            host = parsed_url.hostname if parsed_url.hostname else ""
+            port = parsed_url.port if parsed_url.port else 443
+            params = urllib.parse.parse_qs(parsed_url.query)
+            protocol = "trojan"
+            security = "tls"  # پیش‌فرض برای trojan
+            network = params.get("type", ["tcp"])[0]
+            sni = params.get("sni", [""])[0][0]
+
+        if not all([host, port, user_id]):
+            raise ValueError("اطلاعات ضروری (host, port, user_id) در لینک موجود نیست.")
 
         # ساخت کانفیگ JSON
-        vless_config = {
+        v2ray_config = {
             "clients": [
                 {
                     "subId": "custom_subid",  # باید با subId موجود تطبیق داده شود
-                    "email": "vless_user@example.com",  # باید با email موجود تطبیق داده شود
+                    "email": "v2ray_user@example.com",  # باید با email موجود تطبیق داده شود
                     "total": 1073741824,  # حجم پیش‌فرض 1GB
-                    "id": user_info,
-                    "protocol": "vless",
+                    "id": user_id,
+                    "protocol": protocol,
                     "settings": {
                         "vnext": [
                             {
                                 "address": host,
-                                "port": port,
+                                "port": int(port),
                                 "users": [
                                     {
-                                        "id": user_info,
-                                        "security": params.get("security", ["none"])[0],
-                                        "encryption": params.get("encryption", ["none"])[0],
-                                        "flow": params.get("type", [""])[0] if "type" in params else ""
+                                        "id": user_id,
+                                        "security": security,
+                                        "encryption": "none" if protocol == "vless" else ""
                                     }
                                 ]
                             }
                         ]
                     },
                     "streamSettings": {
-                        "network": params.get("type", ["grpc"])[0] if "type" in params else "tcp",
-                        "security": params.get("security", ["reality"])[0] if "security" in params else "none",
+                        "network": network,
+                        "security": security if security in ["tls", "reality"] else "none",
+                        "tlsSettings": {"serverName": sni} if security == "tls" else {},
                         "realitySettings": {
                             "publicKey": params.get("pbk", [""])[0],
                             "shortId": params.get("sid", [""])[0],
                             "spiderX": params.get("spx", [""])[0]
-                        } if "security" in params and params["security"][0] == "reality" else {},
-                        "grpcSettings": {
-                            "serviceName": params.get("serviceName", [""])[0]
-                        } if params.get("type", [""])[0] == "grpc" else {}
+                        } if security == "reality" else {},
+                        "grpcSettings": {"serviceName": params.get("serviceName", [""])[0]} if network == "grpc" else {}
                     }
                 }
             ]
@@ -261,8 +285,7 @@ async def add_vless_config(update, context):
                 settings = cursor.fetchone()
                 if settings:
                     settings_json = json.loads(settings[0])
-                    external_clients = vless_config["clients"]
-                    # تطبیق subId و email
+                    external_clients = v2ray_config["clients"]
                     for client in external_clients:
                         client["subId"] = sub_id
                         client["email"] = rep_email
@@ -271,18 +294,18 @@ async def add_vless_config(update, context):
                         "UPDATE inbounds SET settings = ? WHERE id = ?",
                         (json.dumps(settings_json), rep_inbound_id)
                     )
-                    logging.info(f"کانفیگ vless به inbound_id {rep_inbound_id} اضافه شد")
+                    logging.info(f"کانفیگ v2ray به inbound_id {rep_inbound_id} اضافه شد")
 
         conn.commit()
         conn.close()
-        await update.message.reply_text(f"کانفیگ vless با موفقیت اضافه شد: {vless_link}")
+        await update.message.reply_text(f"کانفیگ v2ray با موفقیت اضافه شد: {link}")
         return ConversationHandler.END
-    except ValueError as e:
+    except (ValueError, base64.b64decodeError) as e:
         await update.message.reply_text(f"خطا: {str(e)}")
         return INPUT_VLESS_LINK
     except Exception as e:
         await update.message.reply_text(f"خطا در پردازش لینک: {str(e)}")
-        logging.error(f"خطا در افزودن کانفیگ vless: {str(e)}")
+        logging.error(f"خطا در افزودن کانفیگ v2ray: {str(e)}")
         return INPUT_VLESS_LINK
 
 async def set_interval(update, context):
@@ -324,21 +347,21 @@ def main():
     # تنظیم ربات تلگرام
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # تنظیم ConversationHandler برای تغییر مدت زمان و افزودن لینک vless
+    # تنظیم ConversationHandler برای تغییر مدت زمان و افزودن لینک v2ray
     conv_handler = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex('^(تغییر زمان|اضافه کردن لینک vless)$'), handle_button)
+            MessageHandler(filters.Regex('^(تغییر زمان|اضافه کردن لینک v2ray)$'), handle_button)
         ],
         states={
             INPUT_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_interval)],
-            INPUT_VLESS_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_vless_config)],
+            INPUT_VLESS_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_v2ray_config)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
-    application.add_handler(MessageHandler(filters.Regex('^(شروع|توقف|وضعیت|تغییر زمان|اضافه کردن لینک vless)$'), handle_button))
+    application.add_handler(MessageHandler(filters.Regex('^(شروع|توقف|وضعیت|تغییر زمان|اضافه کردن لینک v2ray)$'), handle_button))
 
     # اجرای ربات و زمان‌بندی در تردهای جداگانه
     loop = asyncio.get_event_loop()
