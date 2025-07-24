@@ -2,6 +2,8 @@ import sqlite3
 import time
 import schedule
 import urllib.parse
+import base64
+import ejs  # فرض بر نصب EJS از طریق Node.js
 from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler, filters
 from datetime import datetime
@@ -16,11 +18,12 @@ logging.basicConfig(filename='/opt/3x-ui-sync/sync_xui.log', level=logging.INFO,
 TELEGRAM_BOT_TOKEN = "8036904228:AAELw-wxr92SPpsfHPlJcIITCg8bHdukJss"  # توکن ربات
 TELEGRAM_CHAT_ID = "54515010"     # شناسه مدیر یا کانال
 DB_PATH = "/etc/x-ui/x-ui.db"     # مسیر پایگاه داده 3X-UI
+SUBSCRIPTION_BASE_URL = "https://dhc.styxx.click:2087/sub/"  # پورت جدید
 
 # متغیرهای جهانی
 is_sync_running = True
 sync_interval = 10  # بازه زمانی پیش‌فرض (دقیقه)
-INPUT_INTERVAL, INPUT_VLESS_LINK = range(2)  # حالت‌های ConversationHandler
+INPUT_INTERVAL, INPUT_V2RAY_LINK = range(2)  # حالت‌های ConversationHandler
 
 async def send_telegram_message(message):
     """ارسال پیام به تلگرام"""
@@ -30,6 +33,13 @@ async def send_telegram_message(message):
         logging.info(f"پیام تلگرام ارسال شد: {message}")
     except Exception as e:
         logging.error(f"خطا در ارسال پیام تلگرام: {str(e)}")
+
+def render_subscription_template(user_data):
+    """رندر قالب سابسکریپشن با داده‌های کاربر"""
+    import ejs
+    with open('/opt/DVHOST/views/sub.ejs', 'r') as f:
+        template = f.read()
+    return ejs.render(template, {'data': user_data})
 
 def sync_users():
     """همگام‌سازی ترافیک و افزودن کانفیگ خارجی به لینک سابسکریپشن"""
@@ -67,14 +77,14 @@ def sync_users():
             if sub_id:
                 if sub_id not in user_groups:
                     user_groups[sub_id] = []
-                user_groups[sub_id].append((traffic_id, inbound_id, email))
+                user_groups[sub_id].append((traffic_id, inbound_id, email, up, down, expiry_time, enable))
 
         # همگام‌سازی و مدیریت کانفیگ
         for sub_id, group in user_groups.items():
             if len(group) > 1:  # فقط گروه‌های با بیش از یک کاربر
                 # انتخاب نماینده (اولین کاربر)
                 representative = group[0]
-                rep_traffic_id, rep_inbound_id, rep_email = representative
+                rep_traffic_id, rep_inbound_id, rep_email, rep_up, rep_down, rep_expiry, rep_enable = representative
 
                 # محاسبه حداکثر ترافیک و انقضا
                 max_up = max(traffic[3] for traffic in traffics if traffic[1] in [g[1] for g in group] and traffic[3] is not None)
@@ -98,12 +108,28 @@ def sync_users():
                             break
 
                 # به‌روزرسانی همه کاربران گروه
-                for traffic_id, inbound_id, email in group:
+                for traffic_id, inbound_id, email, _, _, _, _ in group:
                     enable_status = 0 if is_any_disabled else 1
                     cursor.execute(
                         "UPDATE client_traffics SET up = ?, down = ?, expiry_time = ?, enable = ? WHERE id = ?",
                         (max_up, max_down, max_expiry, enable_status, traffic_id)
                     )
+
+                # تولید داده برای قالب
+                user_data = {
+                    "id": rep_traffic_id,
+                    "email": rep_email,
+                    "suburl": f"{SUBSCRIPTION_BASE_URL}{rep_email}",
+                    "enable": bool(rep_enable),
+                    "up": rep_up,
+                    "down": rep_down,
+                    "total": next((c["total"] for c in json.loads(next((s for _, s in inbounds if _ == rep_inbound_id), '{"clients": []}'))["clients"] if c.get("email") == rep_email), 0),
+                    "expiryTime": rep_expiry,
+                    "inboundId": rep_inbound_id
+                }
+                html_output = render_subscription_template(user_data)
+                with open(f'/opt/DVHOST/sub_{sub_id}.html', 'w') as f:
+                    f.write(html_output)
 
                 logging.info(f"همگام‌سازی برای subId: {sub_id} انجام شد - وضعیت: {'غیرفعال' if is_any_disabled else 'فعال'}")
 
@@ -129,6 +155,7 @@ async def start(update, context):
             KeyboardButton("وضعیت"),
             KeyboardButton("تغییر زمان"),
             KeyboardButton("اضافه کردن لینک v2ray"),
+            KeyboardButton("نمایش سابسکریپشن")
         ]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
@@ -160,7 +187,37 @@ async def handle_button(update, context):
         return INPUT_INTERVAL
     elif message_text == "اضافه کردن لینک v2ray":
         await update.message.reply_text("لینک v2ray (vmess/vless/trojan) را ارسال کنید (مثل vmess://... یا vless://...):")
-        return INPUT_VLESS_LINK
+        return INPUT_V2RAY_LINK
+    elif message_text == "نمایش سابسکریپشن":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, inbound_id, email, up, down, expiry_time, enable FROM client_traffics LIMIT 1")
+        traffic = cursor.fetchone()
+        if traffic:
+            traffic_id, inbound_id, email, up, down, expiry_time, enable = traffic
+            cursor.execute("SELECT settings FROM inbounds WHERE id = ?", (inbound_id,))
+            settings = cursor.fetchone()
+            total = next((c["total"] for c in json.loads(settings[0])["clients"] if c.get("email") == email), 0) if settings else 0
+            user_data = {
+                "id": traffic_id,
+                "email": email,
+                "suburl": f"{SUBSCRIPTION_BASE_URL}{email}",
+                "enable": bool(enable),
+                "up": up,
+                "down": down,
+                "total": total,
+                "expiryTime": expiry_time,
+                "inboundId": inbound_id
+            }
+            html_output = render_subscription_template(user_data)
+            with open('/tmp/subscription.html', 'w') as f:
+                f.write(html_output)
+            with open('/tmp/subscription.html', 'rb') as f:
+                await context.bot.send_document(chat_id=update.message.chat_id, document=f)
+        else:
+            await update.message.reply_text("هیچ کاربری یافت نشد.")
+        conn.close()
+        return ConversationHandler.END
     return ConversationHandler.END
 
 async def add_v2ray_config(update, context):
@@ -175,32 +232,32 @@ async def add_v2ray_config(update, context):
             decoded = base64.b64decode(link.replace("vmess://", "")).decode('utf-8')
             config = json.loads(decoded)
             protocol = "vmess"
-            user_id = config.get("id")
-            host = config.get("add")
-            port = config.get("port")
+            user_id = config.get("id", "")
+            host = config.get("add", "")
+            port = int(config.get("port", 443))
             security = config.get("security", "auto")
             network = config.get("net", "tcp")
             sni = config.get("sni", "")
         elif link.startswith("vless://"):
             parsed_url = urllib.parse.urlparse(link.replace("vless://", ""))
-            user_id = urllib.parse.unquote(parsed_url.username)
+            user_id = urllib.parse.unquote(parsed_url.username) if parsed_url.username else ""
             host = parsed_url.hostname if parsed_url.hostname else ""
             port = parsed_url.port if parsed_url.port else 443
-            params = urllib.parse.parse_qs(parsed_url.query)
+            params = urllib.parse.parse_qs(parsed_url.query) if parsed_url.query else {}
             protocol = "vless"
             security = params.get("security", ["none"])[0]
             network = params.get("type", ["tcp"])[0]
-            sni = params.get("sni", [""])[0][0]
+            sni = params.get("sni", [""])[0] if params.get("sni") else ""
         elif link.startswith("trojan://"):
             parsed_url = urllib.parse.urlparse(link.replace("trojan://", ""))
-            user_id = urllib.parse.unquote(parsed_url.username)
+            user_id = urllib.parse.unquote(parsed_url.username) if parsed_url.username else ""
             host = parsed_url.hostname if parsed_url.hostname else ""
             port = parsed_url.port if parsed_url.port else 443
-            params = urllib.parse.parse_qs(parsed_url.query)
+            params = urllib.parse.parse_qs(parsed_url.query) if parsed_url.query else {}
             protocol = "trojan"
             security = "tls"  # پیش‌فرض برای trojan
             network = params.get("type", ["tcp"])[0]
-            sni = params.get("sni", [""])[0][0]
+            sni = params.get("sni", [""])[0] if params.get("sni") else ""
 
         if not all([host, port, user_id]):
             raise ValueError("اطلاعات ضروری (host, port, user_id) در لینک موجود نیست.")
@@ -209,16 +266,13 @@ async def add_v2ray_config(update, context):
         v2ray_config = {
             "clients": [
                 {
-                    "subId": "custom_subid",  # باید با subId موجود تطبیق داده شود
-                    "email": "v2ray_user@example.com",  # باید با email موجود تطبیق داده شود
-                    "total": 1073741824,  # حجم پیش‌فرض 1GB
                     "id": user_id,
                     "protocol": protocol,
                     "settings": {
                         "vnext": [
                             {
                                 "address": host,
-                                "port": int(port),
+                                "port": port,
                                 "users": [
                                     {
                                         "id": user_id,
@@ -289,6 +343,9 @@ async def add_v2ray_config(update, context):
                     for client in external_clients:
                         client["subId"] = sub_id
                         client["email"] = rep_email
+                        client["total"] = 1073741824  # حجم پیش‌فرض 1GB
+                    if "clients" not in settings_json:
+                        settings_json["clients"] = []
                     settings_json["clients"].extend(external_clients)
                     cursor.execute(
                         "UPDATE inbounds SET settings = ? WHERE id = ?",
@@ -302,11 +359,11 @@ async def add_v2ray_config(update, context):
         return ConversationHandler.END
     except (ValueError, base64.b64decodeError) as e:
         await update.message.reply_text(f"خطا: {str(e)}")
-        return INPUT_VLESS_LINK
+        return INPUT_V2RAY_LINK
     except Exception as e:
         await update.message.reply_text(f"خطا در پردازش لینک: {str(e)}")
         logging.error(f"خطا در افزودن کانفیگ v2ray: {str(e)}")
-        return INPUT_VLESS_LINK
+        return INPUT_V2RAY_LINK
 
 async def set_interval(update, context):
     """دریافت و اعمال مدت زمان جدید همگام‌سازی"""
@@ -354,14 +411,14 @@ def main():
         ],
         states={
             INPUT_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_interval)],
-            INPUT_VLESS_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_v2ray_config)],
+            INPUT_V2RAY_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_v2ray_config)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
-    application.add_handler(MessageHandler(filters.Regex('^(شروع|توقف|وضعیت|تغییر زمان|اضافه کردن لینک v2ray)$'), handle_button))
+    application.add_handler(MessageHandler(filters.Regex('^(شروع|توقف|وضعیت|تغییر زمان|اضافه کردن لینک v2ray|نمایش سابسکریپشن)$'), handle_button))
 
     # اجرای ربات و زمان‌بندی در تردهای جداگانه
     loop = asyncio.get_event_loop()
