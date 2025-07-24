@@ -2,6 +2,7 @@ import sqlite3
 import time
 import schedule
 import requests
+import urllib.parse
 from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler, filters
 from datetime import datetime
@@ -20,7 +21,7 @@ DB_PATH = "/etc/x-ui/x-ui.db"     # مسیر پایگاه داده 3X-UI
 # متغیرهای جهانی
 is_sync_running = True
 sync_interval = 10  # بازه زمانی پیش‌فرض (دقیقه)
-INPUT_INTERVAL, INPUT_CONFIG_LINK = range(2)  # حالت‌های ConversationHandler
+INPUT_INTERVAL, INPUT_VLESS_LINK = range(2)  # حالت‌های ConversationHandler
 
 async def send_telegram_message(message):
     """ارسال پیام به تلگرام"""
@@ -128,7 +129,7 @@ async def start(update, context):
             KeyboardButton("توقف"),
             KeyboardButton("وضعیت"),
             KeyboardButton("تغییر زمان"),
-            KeyboardButton("اضافه کردن لینک کانفیگ"),
+            KeyboardButton("اضافه کردن لینک vless"),
         ]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
@@ -158,18 +159,66 @@ async def handle_button(update, context):
     elif message_text == "تغییر زمان":
         await update.message.reply_text("مدت زمان جدید (دقیقه) را وارد کنید:")
         return INPUT_INTERVAL
-    elif message_text == "اضافه کردن لینک کانفیگ":
-        await update.message.reply_text("لینک کانفیگ JSON را ارسال کنید (مثلاً https://example.com/config.json):")
-        return INPUT_CONFIG_LINK
+    elif message_text == "اضافه کردن لینک vless":
+        await update.message.reply_text("لینک vless (مثل vless://...) را ارسال کنید:")
+        return INPUT_VLESS_LINK
     return ConversationHandler.END
 
-async def add_config_from_link(update, context):
-    """دریافت و اضافه کردن کانفیگ از لینک"""
+async def add_vless_config(update, context):
+    """دریافت و اضافه کردن کانفیگ vless از لینک"""
     try:
-        link = update.message.text
-        response = requests.get(link)
-        response.raise_for_status()  # بررسی خطا در درخواست
-        config_data = response.json()
+        vless_link = update.message.text
+        # تحلیل لینک vless
+        if not vless_link.startswith("vless://"):
+            raise ValueError("لینک معتبر vless نیست.")
+        
+        # استخراج بخش‌های لینک
+        parsed_url = urllib.parse.urlparse(vless_link.replace("vless://", ""))
+        user_info = urllib.parse.unquote(parsed_url.username)
+        host, port = parsed_url.hostname, parsed_url.port or 443
+        params = urllib.parse.parse_qs(parsed_url.query)
+        fragment = urllib.parse.unquote(parsed_url.fragment)
+
+        # ساخت کانفیگ JSON
+        vless_config = {
+            "clients": [
+                {
+                    "subId": "custom_subid",  # باید با subId موجود تطبیق داده شود
+                    "email": "vless_user@example.com",  # باید با email موجود تطبیق داده شود
+                    "total": 1073741824,  # حجم پیش‌فرض 1GB
+                    "id": user_info,
+                    "protocol": "vless",
+                    "settings": {
+                        "vnext": [
+                            {
+                                "address": host,
+                                "port": port,
+                                "users": [
+                                    {
+                                        "id": user_info,
+                                        "security": params.get("security", ["none"])[0],
+                                        "encryption": params.get("encryption", ["none"])[0],
+                                        "flow": params.get("type", [""])[0] if "type" in params else ""
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    "streamSettings": {
+                        "network": params.get("type", ["grpc"])[0] if "type" in params else "tcp",
+                        "security": params.get("security", ["reality"])[0] if "security" in params else "none",
+                        "realitySettings": {
+                            "publicKey": params.get("pbk", [""])[0],
+                            "shortId": params.get("sid", [""])[0],
+                            "spiderX": params.get("spx", [""])[0]
+                        } if "security" in params and params["security"][0] == "reality" else {},
+                        "grpcSettings": {
+                            "serviceName": params.get("serviceName", [""])[0]
+                        } if params.get("type", [""])[0] == "grpc" else {}
+                    }
+                }
+            ]
+        }
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -212,29 +261,29 @@ async def add_config_from_link(update, context):
                 settings = cursor.fetchone()
                 if settings:
                     settings_json = json.loads(settings[0])
-                    external_clients = config_data.get("clients", [])
-                    if external_clients:
-                        settings_json["clients"].extend(external_clients)
-                        cursor.execute(
-                            "UPDATE inbounds SET settings = ? WHERE id = ?",
-                            (json.dumps(settings_json), rep_inbound_id)
-                        )
-                        logging.info(f"کانفیگ از لینک {link} به inbound_id {rep_inbound_id} اضافه شد")
+                    external_clients = vless_config["clients"]
+                    # تطبیق subId و email
+                    for client in external_clients:
+                        client["subId"] = sub_id
+                        client["email"] = rep_email
+                    settings_json["clients"].extend(external_clients)
+                    cursor.execute(
+                        "UPDATE inbounds SET settings = ? WHERE id = ?",
+                        (json.dumps(settings_json), rep_inbound_id)
+                    )
+                    logging.info(f"کانفیگ vless به inbound_id {rep_inbound_id} اضافه شد")
 
         conn.commit()
         conn.close()
-        await update.message.reply_text(f"کانفیگ از لینک {link} با موفقیت اضافه شد.")
+        await update.message.reply_text(f"کانفیگ vless با موفقیت اضافه شد: {vless_link}")
         return ConversationHandler.END
-    except requests.RequestException as e:
-        await update.message.reply_text(f"خطا در دانلود لینک: {str(e)}")
-        return INPUT_CONFIG_LINK
-    except json.JSONDecodeError:
-        await update.message.reply_text("فرمت JSON نادرست است. لطفاً لینک معتبر را امتحان کنید.")
-        return INPUT_CONFIG_LINK
-    except Exception as e:
+    except ValueError as e:
         await update.message.reply_text(f"خطا: {str(e)}")
-        logging.error(f"خطا در افزودن کانفیگ از لینک: {str(e)}")
-        return INPUT_CONFIG_LINK
+        return INPUT_VLESS_LINK
+    except Exception as e:
+        await update.message.reply_text(f"خطا در پردازش لینک: {str(e)}")
+        logging.error(f"خطا در افزودن کانفیگ vless: {str(e)}")
+        return INPUT_VLESS_LINK
 
 async def set_interval(update, context):
     """دریافت و اعمال مدت زمان جدید همگام‌سازی"""
@@ -275,21 +324,21 @@ def main():
     # تنظیم ربات تلگرام
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # تنظیم ConversationHandler برای تغییر مدت زمان و افزودن لینک کانفیگ
+    # تنظیم ConversationHandler برای تغییر مدت زمان و افزودن لینک vless
     conv_handler = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.Regex('^(تغییر زمان|اضافه کردن لینک کانفیگ)$'), handle_button)
+            MessageHandler(filters.Regex('^(تغییر زمان|اضافه کردن لینک vless)$'), handle_button)
         ],
         states={
             INPUT_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_interval)],
-            INPUT_CONFIG_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_from_link)],
+            INPUT_VLESS_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_vless_config)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
-    application.add_handler(MessageHandler(filters.Regex('^(شروع|توقف|وضعیت|تغییر زمان|اضافه کردن لینک کانفیگ)$'), handle_button))
+    application.add_handler(MessageHandler(filters.Regex('^(شروع|توقف|وضعیت|تغییر زمان|اضافه کردن لینک vless)$'), handle_button))
 
     # اجرای ربات و زمان‌بندی در تردهای جداگانه
     loop = asyncio.get_event_loop()
