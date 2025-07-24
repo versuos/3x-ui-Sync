@@ -3,7 +3,7 @@ import time
 import schedule
 import urllib.parse
 import base64
-import ejs  # فرض بر نصب EJS از طریق Node.js
+from jinja2 import Environment, FileSystemLoader
 from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler, filters
 from datetime import datetime
@@ -19,6 +19,8 @@ TELEGRAM_BOT_TOKEN = "8036904228:AAELw-wxr92SPpsfHPlJcIITCg8bHdukJss"  # توک�
 TELEGRAM_CHAT_ID = "54515010"     # شناسه مدیر یا کانال
 DB_PATH = "/etc/x-ui/x-ui.db"     # مسیر پایگاه داده 3X-UI
 SUBSCRIPTION_BASE_URL = "https://dhc.styxx.click:2087/sub/"  # پورت جدید
+TEMPLATE_DIR = "/opt/DVHOST/views"
+ENV = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
 
 # متغیرهای جهانی
 is_sync_running = True
@@ -36,10 +38,8 @@ async def send_telegram_message(message):
 
 def render_subscription_template(user_data):
     """رندر قالب سابسکریپشن با داده‌های کاربر"""
-    import ejs
-    with open('/opt/DVHOST/views/sub.ejs', 'r') as f:
-        template = f.read()
-    return ejs.render(template, {'data': user_data})
+    template = ENV.get_template('sub.html')
+    return template.render(data=user_data)
 
 def sync_users():
     """همگام‌سازی ترافیک و افزودن کانفیگ خارجی به لینک سابسکریپشن"""
@@ -116,6 +116,9 @@ def sync_users():
                     )
 
                 # تولید داده برای قالب
+                cursor.execute("SELECT settings FROM inbounds WHERE id = ?", (rep_inbound_id,))
+                settings = cursor.fetchone()
+                total = next((c["total"] for c in json.loads(settings[0])["clients"] if c.get("email") == rep_email), 0) if settings else 0
                 user_data = {
                     "id": rep_traffic_id,
                     "email": rep_email,
@@ -123,7 +126,7 @@ def sync_users():
                     "enable": bool(rep_enable),
                     "up": rep_up,
                     "down": rep_down,
-                    "total": next((c["total"] for c in json.loads(next((s for _, s in inbounds if _ == rep_inbound_id), '{"clients": []}'))["clients"] if c.get("email") == rep_email), 0),
+                    "total": total,
                     "expiryTime": rep_expiry,
                     "inboundId": rep_inbound_id
                 }
