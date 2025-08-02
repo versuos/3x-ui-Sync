@@ -2,24 +2,30 @@ import sqlite3
 import time
 import schedule
 from telegram import Bot, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler, filters
 from datetime import datetime
 import json
 import logging
 import asyncio
+import re
+import os
 
 # تنظیم لاگ‌گیری
 logging.basicConfig(filename='/opt/3x-ui-sync/sync_xui.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # تنظیمات ربات تلگرام
-TELEGRAM_BOT_TOKEN = "8036904228:AAELw-wxr92SPpsfHPlJcIITCg8bHdukJss"  # توکن ربات
-TELEGRAM_CHAT_ID = "54515010"     # شناسه مدیر یا کانال
-DB_PATH = "/etc/x-ui/x-ui.db"     # مسیر پایگاه داده 3X-UI
+with open('/opt/3x-ui-sync/config.json') as f:
+    config = json.load(f)
+    TELEGRAM_BOT_TOKEN = config['TELEGRAM_BOT_TOKEN']
+    TELEGRAM_CHAT_ID = config['TELEGRAM_CHAT_ID']
+    sync_interval = config['SYNC_INTERVAL']
+
+DB_PATH = "/etc/x-ui/x-ui.db"
+V2RAY_SERVER_PATH = "/root/v2ray-sub-manager/server.js"
 
 # متغیرهای جهانی
 is_sync_running = True
-sync_interval = 10  # بازه زمانی پیش‌فرض (دقیقه)
-INPUT_INTERVAL = range(1)  # حالت‌های ConversationHandler
+INPUT_INTERVAL, INPUT_CONFIG = range(2)
 
 async def send_telegram_message(message):
     """ارسال پیام به تلگرام"""
@@ -31,14 +37,12 @@ async def send_telegram_message(message):
         logging.error(f"خطا در ارسال پیام تلگرام: {str(e)}")
 
 def sync_users():
-    """همگام‌سازی ترافیک، تاریخ انقضا و وضعیت فعال/غیرفعال کاربران با subId یکسان"""
+    """همگام‌سازی ترافیک، تاریخ انقضا و وضعیت کاربران با subId یکسان"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-
         cursor.execute("SELECT id, inbound_id, email, up, down, expiry_time, enable FROM client_traffics")
         traffics = cursor.fetchall()
-
         cursor.execute("SELECT id, settings FROM inbounds")
         inbounds = cursor.fetchall()
 
@@ -75,7 +79,6 @@ def sync_users():
                 max_up = max(traffic[3] for traffic in group if traffic[3] is not None)
                 max_down = max(traffic[4] for traffic in group if traffic[4] is not None)
                 max_expiry = max(traffic[5] for traffic in group if traffic[5] is not None)
-
                 is_any_disabled = False
                 for traffic in group:
                     traffic_id, inbound_id, email, up, down, expiry_time, enable = traffic
@@ -90,7 +93,6 @@ def sync_users():
                     if enable == 0:
                         is_any_disabled = True
                         break
-
                 for traffic in group:
                     traffic_id = traffic[0]
                     enable_status = 0 if is_any_disabled else 1
@@ -98,7 +100,6 @@ def sync_users():
                         "UPDATE client_traffics SET up = ?, down = ?, expiry_time = ?, enable = ? WHERE id = ?",
                         (max_up, max_down, max_expiry, enable_status, traffic_id)
                     )
-
                 logging.info(f"همگام‌سازی برای subId: {sub_id} انجام شد - وضعیت: {'غیرفعال' if is_any_disabled else 'فعال'}")
 
         if user_groups:
@@ -108,11 +109,28 @@ def sync_users():
         conn.commit()
         conn.close()
         logging.info("همگام‌سازی با موفقیت انجام شد")
-
     except Exception as e:
         error_message = f"خطا در همگام‌سازی: {str(e)}"
         logging.error(error_message)
         asyncio.run(send_telegram_message(error_message))
+
+def update_external_config(new_config):
+    """به‌روزرسانی کانفیگ خارجی در server.js"""
+    try:
+        if not re.match(r'^vless://[0-9a-f-]+@[0-9a-zA-Z.-]+:[0-9]+\?', new_config):
+            raise ValueError("فرمت کانفیگ VLESS نامعتبر است")
+        with open(V2RAY_SERVER_PATH, 'r') as f:
+            content = f.read()
+        new_content = re.sub(r"const externalConfig = 'vless://[^']*';",
+                            f"const externalConfig = '{new_config}';", content)
+        with open(V2RAY_SERVER_PATH, 'w') as f:
+            f.write(new_content)
+        os.system('pm2 restart server')
+        logging.info(f"کانفیگ خارجی به‌روزرسانی شد: {new_config}")
+        return True
+    except Exception as e:
+        logging.error(f"خطا در به‌روزرسانی کانفیگ خارجی: {str(e)}")
+        return False
 
 async def start(update, context):
     """نمایش کیبورد Reply با دستور /start"""
@@ -122,6 +140,7 @@ async def start(update, context):
             KeyboardButton("توقف"),
             KeyboardButton("وضعیت"),
             KeyboardButton("تغییر زمان"),
+            KeyboardButton("تغییر کانفیگ")
         ]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
@@ -151,6 +170,9 @@ async def handle_button(update, context):
     elif message_text == "تغییر زمان":
         await update.message.reply_text("مدت زمان جدید (دقیقه) را وارد کنید:")
         return INPUT_INTERVAL
+    elif message_text == "تغییر کانفیگ":
+        await update.message.reply_text("کانفیگ VLESS جدید را وارد کنید (شروع با vless://):")
+        return INPUT_CONFIG
     return ConversationHandler.END
 
 async def set_interval(update, context):
@@ -162,6 +184,11 @@ async def set_interval(update, context):
             await update.message.reply_text("لطفاً عدد مثبت وارد کنید.")
             return INPUT_INTERVAL
         sync_interval = new_interval
+        with open('/opt/3x-ui-sync/config.json', 'r') as f:
+            config = json.load(f)
+        config['SYNC_INTERVAL'] = sync_interval
+        with open('/opt/3x-ui-sync/config.json', 'w') as f:
+            json.dump(config, f, indent=2)
         if is_sync_running:
             schedule.clear()
             schedule.every(sync_interval).minutes.do(sync_users)
@@ -172,8 +199,18 @@ async def set_interval(update, context):
         await update.message.reply_text("لطفاً عدد معتبر وارد کنید.")
         return INPUT_INTERVAL
 
+async def set_config(update, context):
+    """دریافت و اعمال کانفیگ خارجی جدید"""
+    new_config = update.message.text
+    if update_external_config(new_config):
+        await update.message.reply_text(f"کانفیگ خارجی به‌روزرسانی شد: {new_config}\nسرور Node.js ری‌استارت شد.")
+        asyncio.run(send_telegram_message(f"کانفیگ خارجی به‌روزرسانی شد: {new_config}"))
+    else:
+        await update.message.reply_text("خطا: کانفیگ نامعتبر است یا به‌روزرسانی انجام نشد.")
+    return ConversationHandler.END
+
 async def cancel(update, context):
-    """لغو عملیات تغییر مدت زمان"""
+    """لغو عملیات"""
     await update.message.reply_text("عملیات لغو شد.")
     return ConversationHandler.END
 
@@ -186,26 +223,22 @@ def run_schedule():
 
 def main():
     """نقطه ورود اصلی برنامه"""
-    # تنظیم زمان‌بندی پیش‌فرض
     schedule.every(sync_interval).minutes.do(sync_users)
-
-    # تنظیم ربات تلگرام
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # تنظیم ConversationHandler برای تغییر مدت زمان
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^(تغییر زمان)$'), handle_button)],
+        entry_points=[
+            MessageHandler(filters.Regex('^(تغییر زمان)$'), handle_button),
+            MessageHandler(filters.Regex('^(تغییر کانفیگ)$'), handle_button)
+        ],
         states={
             INPUT_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_interval)],
+            INPUT_CONFIG: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_config)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
-    application.add_handler(MessageHandler(filters.Regex('^(شروع|توقف|وضعیت|تغییر زمان)$'), handle_button))
-
-    # اجرای ربات و زمان‌بندی در تردهای جداگانه
+    application.add_handler(MessageHandler(filters.Regex('^(شروع|توقف|وضعیت|تغییر زمان|تغییر کانفیگ)$'), handle_button))
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, run_schedule)
     application.run_polling()
